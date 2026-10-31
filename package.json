@@ -1,0 +1,12 @@
+{
+  "name": "whirlpool-watcher",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Out-of-tree Whirlpool fill watcher: consumes the reeflog mailbox (tail or signed webhook), decodes Traded events, keeps a durable fill ledger. Zero RPC calls of its own.",
+  "scripts": {
+    "test": "node --test test/",
+    "watch": "node src/whirlpool-watcher.mjs",
+    "receiver": "node src/receiver.mjs"
+  }
+}
