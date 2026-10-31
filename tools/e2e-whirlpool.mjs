@@ -30,6 +30,14 @@
 //  7. retraction_undo_is_scoped     - a retraction undoes exactly the fill
 //                                     this consumer read, and nothing else.
 //
+// The naive baseline is a COMPETENT bot, not a broken one: it skips failed
+// transactions and zero-amount trades, exactly like the watcher does.
+// Measured 2026-10-31: the first version's naive side booked fills from
+// reverted transactions (the logs still carry the Traded event, but the
+// transaction rolled back) and from 0/0 trades, and the harness then demanded
+// the watcher hold them too — a baseline that books phantom fills would make
+// window_superset a test of sloppiness, not of delivery.
+//
 // A mutation probe (--mutate) corrupts the decoder on purpose and requires
 // the E2E to go RED at the named check: a green harness over a broken
 // decoder is worse than no harness.
@@ -211,10 +219,16 @@ console.log(`daemon window: slots ${win.lo}..${win.hi}, ${win.n} rows`);
 // it would decode its own fills. `slot` comes from the signatures page, so
 // no content is bought for signatures outside the window.
 const naive = new Map(); // sig -> {slot, trades}
-let bought = 0, errors = 0;
+let bought = 0, errors = 0, skipped_failed = 0, skipped_zero = 0;
 const inWindowSigs = [...sigSlot.entries()]
   .filter(([, slot]) => slot >= win.lo && slot <= win.hi);
-for (const [sig, slot] of inWindowSigs) {
+// Bounded buy: the public endpoint rate-limits, and buying every in-window
+// signature on a busy program (~900 of them) turned the harness into a
+// throttling experiment instead of a measurement. The budget is a declared
+// sample; the report says how much of the window it covers.
+const TX_BUDGET = Number(process.env.WW_E2E_TX_BUDGET || 120);
+const boughtSet = inWindowSigs.slice(0, TX_BUDGET);
+for (const [sig, slot] of boughtSet) {
   let tx;
   try {
     tx = await rpc('getTransaction', [sig, {
@@ -223,9 +237,17 @@ for (const [sig, slot] of inWindowSigs) {
   } catch { errors++; continue; }
   bought++;
   if (!tx) continue;
-  const trades = naiveDecode(tx.meta?.logMessages);
+  // A failed transaction's logs still contain the Traded event, but the
+  // transaction rolled back: no balance moved. Booking it is a phantom fill.
+  if (tx.meta?.err != null) { skipped_failed++; continue; }
+  let trades = naiveDecode(tx.meta?.logMessages);
+  // A 0/0 trade exchanges nothing; it is not a fill on either side.
+  const nonzero = trades.filter((t) => t.input !== 0n || t.output !== 0n);
+  skipped_zero += trades.length - nonzero.length;
+  trades = nonzero;
   if (trades.length) naive.set(sig, { slot, trades });
 }
+console.log(`naive bought ${bought}/${inWindowSigs.length} in-window signatures (budget ${TX_BUDGET}); skipped_failed=${skipped_failed} skipped_zero=${skipped_zero}`);
 const naiveSlots = [...sigSlot.values()];
 const naiveLo = naiveSlots.length ? Math.min(...naiveSlots) : null;
 const naiveHi = naiveSlots.length ? Math.max(...naiveSlots) : null;
@@ -283,16 +305,30 @@ check('decoded_amounts_match', mismatches.length === 0 && identical > 0,
   (mismatches.length ? ` first=${JSON.stringify(mismatches[0])}` : ''));
 
 // --- chain witness: fetch each claimed fill's transaction by signature -----
+// Three outcomes, kept apart on purpose (the same honesty model reeflog
+// uses for payloads): witnessed = chain deltas corroborate the decode;
+// mismatched = chain deltas CONTRADICT it (the decoder is wrong — that is
+// the falsification); unavailable = the endpoint did not serve the
+// transaction, which is evidence about the endpoint, not about the decoder,
+// and is reported as its own count, never folded into either.
 let witnessed = 0;
-const unwitnessed = [];
-for (const f of fills) {
+const mismatched = [];
+let unavailable = 0;
+// Bounded sample, declared: one getTransaction per fill was 600+ calls for a
+// 45 s window. The sample is deterministic (journal order), not cherry-picked.
+const WITNESS_LIMIT = Number(process.env.WW_E2E_WITNESS_LIMIT || 40);
+const witnessSample = fills
+  .slice()
+  .sort((a, b) => a.seq - b.seq)
+  .slice(0, WITNESS_LIMIT);
+for (const f of witnessSample) {
   let tx;
   try {
     tx = await rpc('getTransaction', [f.signature, {
       commitment: 'confirmed', maxSupportedTransactionVersion: 1, encoding: 'json',
     }], 'tx');
-  } catch { unwitnessed.push(f.signature); continue; }
-  if (!tx?.meta) { unwitnessed.push(f.signature); continue; }
+  } catch { unavailable++; continue; }
+  if (!tx?.meta) { unavailable++; continue; }
   const pre = tx.meta.preTokenBalances || [];
   const post = tx.meta.postTokenBalances || [];
   const postByIdx = new Map(post.map((p) => [p.accountIndex, p.uiTokenAmount.amount]));
@@ -305,11 +341,13 @@ for (const f of fills) {
   const hitIn = abs.includes(f.input);
   const hitOut = abs.includes(f.output);
   if (hitIn && hitOut) witnessed++;
-  else unwitnessed.push(`${f.signature.slice(0, 12)} in=${f.input} out=${f.output}`);
+  else mismatched.push(`${f.signature.slice(0, 12)} in=${f.input} out=${f.output}`);
 }
-check('chain_witness', unwitnessed.length === 0 && witnessed > 0,
-  `${witnessed}/${fills.length} ledger fills corroborated by the chain's token-balance deltas` +
-  (unwitnessed.length ? `; unwitnessed: ${unwitnessed.slice(0, 3).join(' | ')}` : ''));
+check('chain_witness', mismatched.length === 0 && witnessed > 0,
+  `${witnessed}/${witnessSample.length} sampled ledger fills (seq order, sample of ${fills.length}) ` +
+  `corroborated by the chain's token-balance deltas; mismatched=${mismatched.length} ` +
+  `unavailable=${unavailable}` +
+  (mismatched.length ? `; contradiction: ${mismatched.slice(0, 3).join(' | ')}` : ''));
 
 // --- no guessed fills ------------------------------------------------------
 const invalidLegs = (ledger.meta.invalid_events || []).length;
@@ -354,9 +392,9 @@ const report = {
   program: PROGRAM,
   rpc: 'https://api.mainnet-beta.solana.com',
   window: win,
-  naive: { polls, signatures_tracked: sigSlot.size, signatures_in_window: naiveInCount, txs_bought: bought, txs_with_trades: naive.size, errors, rpc_calls: rpcCalls.sigs + rpcCalls.tx },
+  naive: { polls, signatures_tracked: sigSlot.size, signatures_in_window: naiveInCount, txs_bought: bought, txs_with_trades: naive.size, skipped_failed, skipped_zero, errors, rpc_calls: rpcCalls.sigs + rpcCalls.tx },
   watcher: { rows: w.rows, fills: fills.length, rpc_calls: watcherCalls, decode_ms: watchMs },
-  chain_witness: { witnessed, total: fills.length },
+  chain_witness: { witnessed, mismatched: mismatched.length, unavailable, sampled: witnessSample.length, total_fills: fills.length, witness_limit: WITNESS_LIMIT, mismatched_detail: mismatched.slice(0, 10) },
   checks,
 };
 fs.writeFileSync(REPORT, JSON.stringify(report, null, 2));

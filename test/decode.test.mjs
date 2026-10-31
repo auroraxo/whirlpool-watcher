@@ -178,3 +178,70 @@ test('rowToFills keeps every decoded field on the fill', () => {
     assert.ok(k in f, `missing ${k}`);
   }
 });
+
+test('a FAILED transaction yields no fill — its Traded event was rolled back', () => {
+  // Regression, found by the live e2e 2026-10-31: 4 of 25 sampled "fills"
+  // came from transactions with meta.err set. Their logs still carry the
+  // Traded event (emitted before a later instruction failed), but no token
+  // balance moved — recording them books phantom fills.
+  const file = path.join('/tmp', 'ww-ledger-failed.json');
+  fs.rmSync(file, { force: true });
+  const ledger = loadLedger(file);
+  const row = {
+    seq: 9,
+    signature: FIX.traded[1].signature,
+    slot: 42,
+    seal: 'confirmed',
+    err: JSON.stringify({ InstructionError: [1, { Custom: 13 }] }),
+    logs: [`Program data: ${FIX.traded[1].program_data}`],
+  };
+  const r = absorbRow(ledger, row);
+  assert.equal(r.fills, 0, 'a reverted transaction must not produce a fill');
+  assert.equal(r.failed, true);
+  assert.equal(Object.keys(ledger.fills).length, 0);
+  // The event is recorded, not dropped: the ledger can explain the absence.
+  assert.equal(ledger.meta.failed_transactions.length, 1);
+  assert.equal(ledger.meta.failed_transactions[0].trades_in_logs, 1);
+  assert.match(ledger.meta.failed_transactions[0].err, /InstructionError/);
+  fs.rmSync(file, { force: true });
+});
+
+test('the same row WITHOUT an error does produce a fill', () => {
+  // False-positive guard: the failed-transaction filter must not eat real
+  // fills. This is the one test in this pair that passes only when the row
+  // has err=null.
+  const file = path.join('/tmp', 'ww-ledger-ok.json');
+  fs.rmSync(file, { force: true });
+  const ledger = loadLedger(file);
+  const r = absorbRow(ledger, {
+    seq: 9,
+    signature: FIX.traded[1].signature,
+    slot: 42,
+    seal: 'finalized',
+    err: null,
+    logs: [`Program data: ${FIX.traded[1].program_data}`],
+  });
+  assert.equal(r.fills, 1);
+  assert.equal(r.failed, false);
+  assert.equal(Object.keys(ledger.fills).length, 1);
+  fs.rmSync(file, { force: true });
+});
+
+test('a zero-amount trade is counted, not booked as a fill', () => {
+  const file = path.join('/tmp', 'ww-ledger-zero.json');
+  fs.rmSync(file, { force: true });
+  const ledger = loadLedger(file);
+  // Build a Traded payload with input=0 and output=0 from a real fixture.
+  const raw = Buffer.from(FIX.traded[0].program_data, 'base64');
+  raw.writeBigUInt64LE(0n, 8 + 32 + 1 + 32); // input_amount
+  raw.writeBigUInt64LE(0n, 8 + 32 + 1 + 32 + 8); // output_amount
+  const r = absorbRow(ledger, {
+    seq: 11, signature: 'zero-trade', slot: 43, seal: 'finalized', err: null,
+    logs: [`Program data: ${raw.toString('base64')}`],
+  });
+  assert.equal(r.fills, 0);
+  assert.equal(r.zero, 1);
+  assert.equal(ledger.meta.zero_amount_trades, 1);
+  assert.equal(Object.keys(ledger.fills).length, 0);
+  fs.rmSync(file, { force: true });
+});

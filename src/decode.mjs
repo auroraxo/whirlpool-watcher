@@ -59,7 +59,14 @@ const u128 = (buf, off) => buf.readBigUInt64LE(off) + (buf.readBigUInt64LE(off +
 // a consumer that silently drops `invalid` claims delivery it did not get.
 export function decodeProgramData(b64) {
   const raw = Buffer.from(b64, 'base64');
-  if (raw.length < 8) return { kind: 'invalid', reason: 'shorter than a discriminator' };
+  // Shorter than the discriminator: CANNOT be a Traded event (it cannot even
+  // hold our 8-byte prefix), so it is another program's event — `other`,
+  // not `invalid`. Only a line that carries our discriminator but the wrong
+  // size is a claimed-but-broken Traded, and that one is `invalid`.
+  // Measured 2026-10-31: an aggregator in the same transaction emitted 3-byte
+  // `Program data:` lines; reporting those as "invalid" was a false alarm
+  // that crowded the ledger's honest debt count.
+  if (raw.length < 8) return { kind: 'other' };
   if (!raw.subarray(0, 8).equals(TRADED_DISCRIMINATOR)) return { kind: 'other' };
   if (raw.length !== TRADED_EVENT_BYTES) {
     return { kind: 'invalid', reason: `Traded payload is ${raw.length} bytes, expected 121` };

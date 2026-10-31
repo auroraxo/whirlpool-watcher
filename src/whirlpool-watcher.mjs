@@ -77,10 +77,26 @@ export function saveLedger(file, ledger) {
 
 // Turn one delivered row into ledger entries. `seq` is stored so a fill can
 // be traced back to its delivery (and so the e2e can prove exactly-once).
+//
+// A FAILED transaction is not a fill. Measured 2026-10-31 on live mainnet:
+// 4 of 25 sampled Whirlpool "trades" came from transactions with
+// `meta.err` set (InstructionError[1,{Custom:13}] and friends). Their logs
+// still contain the `Traded` event — the program emitted it before a LATER
+// instruction failed — but the whole transaction was rolled back, so no
+// token balance moved. A consumer that recorded those would book 16% phantom
+// fills. reeflog ships `err` verbatim for exactly this reason; a row whose
+// err is set is reported, not counted as a fill.
+//
+// A zero-amount trade is not a fill either: nothing was exchanged.
 export function rowToFills(row) {
   const { trades, invalid } = tradesFromRow(row);
-  return {
-    fills: trades.map((t) => ({
+  const failed = row.err != null;
+  const zero_amount = trades
+    .filter((t) => t.input_amount === 0n && t.output_amount === 0n)
+    .map((t) => ({ pool: t.whirlpool }));
+  const fills = trades
+    .filter((t) => !(t.input_amount === 0n && t.output_amount === 0n))
+    .map((t) => ({
       signature: row.signature,
       seq: row.seq,
       slot: row.slot,
@@ -96,26 +112,42 @@ export function rowToFills(row) {
       protocol_fee: t.protocol_fee,
       pre_sqrt_price: t.pre_sqrt_price,
       post_sqrt_price: t.post_sqrt_price,
-    })),
-    invalid,
-  };
+    }));
+  return { fills, invalid, failed, zero_amount };
 }
 
 export function absorbRow(ledger, row) {
-  const { fills, invalid } = rowToFills(row);
+  const { fills, invalid, failed, zero_amount } = rowToFills(row);
   let dupes = 0;
-  for (const f of fills) {
-    // Dedup key: same signature, same pool, same decoded amounts = the same
-    // leg (a tx may contain several Traded events from different pools).
-    const dedupKey = `${f.signature}:${f.pool}:${f.input}:${f.output}:${f.lp_fee}`;
-    if (ledger.fills[dedupKey]) { dupes++; continue; }
-    ledger.fills[dedupKey] = { ...f, recorded_at: Date.now() };
+  // A reverted transaction leaves no fill behind. It is recorded as an
+  // event that happened, so the ledger can explain why a trade it saw in the
+  // logs is not a fill.
+  if (failed) {
+    ledger.meta.failed_transactions = (ledger.meta.failed_transactions || []);
+    ledger.meta.failed_transactions.push({
+      seq: row.seq,
+      signature: row.signature,
+      err: row.err,
+      trades_in_logs: fills.length + zero_amount.length,
+    });
+  }
+  if (zero_amount.length) {
+    ledger.meta.zero_amount_trades = (ledger.meta.zero_amount_trades || 0) + zero_amount.length;
+  }
+  if (!failed) {
+    for (const f of fills) {
+      // Dedup key: same signature, same pool, same decoded amounts = the same
+      // leg (a tx may contain several Traded events from different pools).
+      const dedupKey = `${f.signature}:${f.pool}:${f.input}:${f.output}:${f.lp_fee}`;
+      if (ledger.fills[dedupKey]) { dupes++; continue; }
+      ledger.fills[dedupKey] = { ...f, recorded_at: Date.now() };
+    }
   }
   if (invalid.length) {
     ledger.meta.invalid_events = (ledger.meta.invalid_events || []);
     ledger.meta.invalid_events.push({ seq: row.seq, signature: row.signature, invalid });
   }
-  return { fills: fills.length, dupes, invalid: invalid.length };
+  return { fills: failed ? 0 : fills.length, dupes, invalid: invalid.length, failed, zero: zero_amount.length };
 }
 
 // --- tail mode -------------------------------------------------------------
