@@ -63,11 +63,18 @@ const REPORT = path.join(ROOT, 'research', 'whirlpool-e2e-report.json');
 const MUTATE = process.argv.includes('--mutate');
 
 // --- the decoder under test ------------------------------------------------
-// Loaded through a copy so the mutation probe can corrupt the bytes
-// without touching the repository.
+// The WHOLE src tree is copied and the copy is mutated, because the ledger
+// is built by whirlpool-watcher.mjs importing './decode.mjs' — mutating a
+// detached module that nothing imports would run a green probe over dead
+// code (measured 2026-10-31: probe passed on its first run, proving
+// nothing; the mutation must be what the watcher actually executes).
 const decodeSrc = fs.readFileSync(path.join(ROOT, 'src', 'decode.mjs'), 'utf8');
 const decodeDir = path.join(DIR, 'mutant');
 fs.mkdirSync(decodeDir, { recursive: true });
+for (const f of fs.readdirSync(path.join(ROOT, 'src'))) {
+  if (f === 'decode.mjs') continue;
+  fs.copyFileSync(path.join(ROOT, 'src', f), path.join(decodeDir, f));
+}
 let decodeCode = decodeSrc;
 if (MUTATE) {
   // Mutation: swap the two amount fields in the decoder under test. The
@@ -85,7 +92,10 @@ if (MUTATE) {
 }
 fs.writeFileSync(path.join(decodeDir, 'decode.mjs'), decodeCode);
 const { decodeProgramData } = await import(path.join(decodeDir, 'decode.mjs'));
-const { watchTail, loadLedger } = await import('../src/whirlpool-watcher.mjs');
+// Import the watcher from the SAME directory, so its './decode.mjs' is the
+// mutated one when --mutate is on and the original otherwise.
+const { watchTail, loadLedger } = await import(
+  path.join(decodeDir, 'whirlpool-watcher.mjs'));
 
 const DISC = createHash('sha256').update('event:Traded').digest().subarray(0, 8);
 
@@ -367,7 +377,7 @@ check('exactly_once_on_replay', after === before,
 // read must undo exactly that fill, and a retraction for an unknown
 // signature must undo nothing.
 {
-  const { applyRetractions } = await import('../src/whirlpool-watcher.mjs');
+  const { applyRetractions } = await import(path.join(decodeDir, 'whirlpool-watcher.mjs'));
   const probe = JSON.parse(JSON.stringify(ledger, (_k, v) => typeof v === 'bigint' ? v.toString() : v));
   const known = fills[0];
   const knownKey = Object.keys(probe.fills).find((k) => probe.fills[k].signature === known.signature);

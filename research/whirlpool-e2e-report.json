@@ -1,37 +1,37 @@
 {
-  "measured_at": "2026-10-31T17:43:25.335Z",
+  "measured_at": "2026-10-31T17:55:41.132Z",
   "mutate": false,
   "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
   "rpc": "https://api.mainnet-beta.solana.com",
   "window": {
-    "lo": 463775462,
-    "hi": 463775571,
-    "n": 2349
+    "lo": 463779517,
+    "hi": 463779598,
+    "n": 430
   },
   "naive": {
-    "polls": 20,
-    "signatures_tracked": 3713,
-    "signatures_in_window": 2191,
-    "txs_bought": 100,
-    "txs_with_trades": 8,
-    "skipped_failed": 46,
+    "polls": 15,
+    "signatures_tracked": 918,
+    "signatures_in_window": 427,
+    "txs_bought": 60,
+    "txs_with_trades": 19,
+    "skipped_failed": 7,
     "skipped_zero": 1,
     "errors": 0,
-    "rpc_calls": 150
+    "rpc_calls": 85
   },
   "watcher": {
-    "rows": 2349,
-    "fills": 464,
+    "rows": 430,
+    "fills": 138,
     "rpc_calls": 0,
-    "decode_ms": 274
+    "decode_ms": 65
   },
   "chain_witness": {
-    "witnessed": 30,
+    "witnessed": 10,
     "mismatched": 0,
     "unavailable": 0,
-    "sampled": 30,
-    "total_fills": 464,
-    "witness_limit": 30,
+    "sampled": 10,
+    "total_fills": 138,
+    "witness_limit": 10,
     "mismatched_detail": []
   },
   "checks": [
@@ -43,32 +43,32 @@
     {
       "name": "window_superset",
       "pass": true,
-      "detail": "8 in-window naive trades, 383 sigs in the ledger, missing 0"
+      "detail": "19 in-window naive trades, 129 sigs in the ledger, missing 0"
     },
     {
       "name": "decoded_amounts_match",
       "pass": true,
-      "detail": "9 overlapping legs decode identically, 0 mismatch(es)"
+      "detail": "21 overlapping legs decode identically, 0 mismatch(es)"
     },
     {
       "name": "chain_witness",
       "pass": true,
-      "detail": "30/30 sampled ledger fills (seq order, sample of 464) corroborated by the chain's token-balance deltas; mismatched=0 unavailable=0"
+      "detail": "10/10 sampled ledger fills (seq order, sample of 138) corroborated by the chain's token-balance deltas; mismatched=0 unavailable=0"
     },
     {
       "name": "no_guessed_fills",
       "pass": true,
-      "detail": "464 fills, all with a decoded pool; 0 invalid leg(s) reported, none guessed"
+      "detail": "138 fills, all with a decoded pool; 0 invalid leg(s) reported, none guessed"
     },
     {
       "name": "exactly_once_on_replay",
       "pass": true,
-      "detail": "ledger 464 fills before replay, 464 after (0 legs seen again, 0 deduped)"
+      "detail": "ledger 138 fills before replay, 138 after (0 legs seen again, 0 deduped)"
     },
     {
       "name": "retraction_undo_is_scoped",
       "pass": true,
-      "detail": "known signature undid 1 fill(s), unknown signature 0; ledger 464 -> 463 open, 1 retracted"
+      "detail": "known signature undid 1 fill(s), unknown signature 0; ledger 138 -> 137 open, 1 retracted"
     }
   ]
 }
