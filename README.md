@@ -94,7 +94,7 @@ ledger, never dropped.
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 12 tests, no network
+node --test 'test/*.test.mjs'          # offline; 21 tests, no network
 REEFLOG_BIN=... node tools/e2e-whirlpool.mjs           # live mainnet comparison
 REEFLOG_BIN=... node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```
@@ -109,6 +109,12 @@ mainnet window and checks:
    independently written decoders.
 4. `chain_witness` — every ledger fill's input/output amounts appear as real
    token-balance moves in a transaction re-fetched from the chain by signature.
+   A side with a declared transfer fee is matched **net of that fee**, because
+   that is what actually moved (`input - input_transfer_fee`); measured on live
+   mainnet 2026-11-09, a 3% transfer-fee mint produced `169628503 - 5088856 =
+   164539647` on chain while the raw amount appeared nowhere — the old
+   raw-only rule called that correct decode a contradiction. The sample always
+   includes fee-bearing fills so the branch is exercised, not just written.
 5. `no_guessed_fills` — every ledger fill came from a `Traded` event; invalid legs
    are counted, never guessed.
 6. `exactly_once_on_replay` — a second tail run adds no fill.
@@ -116,17 +122,22 @@ mainnet window and checks:
    read, and nothing else (an unknown signature undoes nothing).
 
 `--mutate` corrupts the decoder on purpose and requires check 3 to go red: a green
-harness over a broken decoder is worse than no harness.
+harness over a broken decoder is worse than no harness. (Check 4 alone cannot
+catch a pure swap when both amounts are on chain — it proves the amounts are
+real, not their direction; that limit is pinned by the `LIMIT` test in
+`test/witness.test.mjs`.)
 
 ## Limits (honest)
 
 - **No external users yet.** This is the mailbox owner's own consumer, in its own
   second repository; it is user-zero evidence, not adoption.
 - The `Traded` event is the pool's own accounting of the swap; the
-  `chain_witness` check corroborates it against token balance deltas, but
-  transfer-2022 pools' *effective* amounts are the raw amounts minus
-  `input_transfer_fee`/`output_transfer_fee` — the watcher carries both fields
-  verbatim and does not net them.
+  `chain_witness` check corroborates it against token balance deltas,
+  matching transfer-2022 sides net of the verbatim
+  `input_transfer_fee`/`output_transfer_fee`. The watcher still carries the raw
+  amounts and the fees separately and does not net them into the fill — the
+  fee-adjusted value exists only inside the witness rule, so no consumer gets a
+  number the chain did not actually move presented as the raw event amount.
 - Only Whirlpool `Traded` events are decoded. Other programs (and other Whirlpool
   event types) arrive as `other`.
 - The webhook receiver binds to `127.0.0.1` and relies on reeflog's HMAC contract;

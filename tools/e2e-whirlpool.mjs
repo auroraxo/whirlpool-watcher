@@ -94,6 +94,12 @@ fs.writeFileSync(path.join(decodeDir, 'decode.mjs'), decodeCode);
 const { decodeProgramData } = await import(path.join(decodeDir, 'decode.mjs'));
 // Import the watcher from the SAME directory, so its './decode.mjs' is the
 // mutated one when --mutate is on and the original otherwise.
+// The witness rule lives in src/witness.mjs and is copied along; it is NOT
+// mutated (the mutation targets the DECODER), so a mutant decode must still
+// be caught by the same oracle.
+const { witnessVerdict } = await import(path.join(decodeDir, 'witness.mjs'));
+// Import the watcher from the SAME directory, so its './decode.mjs' is the
+// mutated one when --mutate is on and the original otherwise.
 const { watchTail, loadLedger } = await import(
   path.join(decodeDir, 'whirlpool-watcher.mjs'));
 
@@ -324,13 +330,35 @@ check('decoded_amounts_match', mismatches.length === 0 && identical > 0,
 let witnessed = 0;
 const mismatched = [];
 let unavailable = 0;
+let feeAdjusted = 0;
 // Bounded sample, declared: one getTransaction per fill was 600+ calls for a
 // 45 s window. The sample is deterministic (journal order), not cherry-picked.
+//
+// It also ALWAYS includes the fee-bearing fills, up to a declared cap. The
+// seq-order head alone did not contain one (measured 2026-11-09: 39/40
+// witnessed with the raw-amount oracle and one transfer-fee fill reported as
+// a contradiction — the sample simply never asked the right question).
 const WITNESS_LIMIT = Number(process.env.WW_E2E_WITNESS_LIMIT || 40);
-const witnessSample = fills
-  .slice()
-  .sort((a, b) => a.seq - b.seq)
-  .slice(0, WITNESS_LIMIT);
+const FEE_WITNESS_LIMIT = Number(process.env.WW_E2E_FEE_WITNESS_LIMIT || 20);
+const witnessSample = [];
+const seenSample = new Set();
+for (const f of fills.slice().sort((a, b) => a.seq - b.seq).slice(0, WITNESS_LIMIT)) {
+  const k = `${f.seq}:${f.signature}:${f.pool}`;
+  if (seenSample.has(k)) continue;
+  seenSample.add(k);
+  witnessSample.push(f);
+}
+let feeFillsInSample = 0;
+for (const f of fills) {
+  if (feeFillsInSample >= FEE_WITNESS_LIMIT) break;
+  const hasFee = BigInt(f.input_transfer_fee || 0) > 0n || BigInt(f.output_transfer_fee || 0) > 0n;
+  if (!hasFee) continue;
+  const k = `${f.seq}:${f.signature}:${f.pool}`;
+  if (seenSample.has(k)) continue;
+  seenSample.add(k);
+  witnessSample.push(f);
+  feeFillsInSample++;
+}
 for (const f of witnessSample) {
   let tx;
   try {
@@ -342,21 +370,23 @@ for (const f of witnessSample) {
   const pre = tx.meta.preTokenBalances || [];
   const post = tx.meta.postTokenBalances || [];
   const postByIdx = new Map(post.map((p) => [p.accountIndex, p.uiTokenAmount.amount]));
-  const abs = pre.map((p) => {
+  // The witness rule is fee-aware (src/witness.mjs): a token-2022 side with a
+  // declared transfer fee moves NET of that fee, so the raw event amount is
+  // not on chain as such. See the measured case in that file.
+  const deltas = pre.map((p) => {
     const after = postByIdx.get(p.accountIndex);
     if (after === undefined) return null;
-    const d = BigInt(after) - BigInt(p.uiTokenAmount.amount);
-    return d < 0n ? (-d).toString() : d.toString();
+    return BigInt(after) - BigInt(p.uiTokenAmount.amount);
   }).filter((x) => x !== null);
-  const hitIn = abs.includes(f.input);
-  const hitOut = abs.includes(f.output);
-  if (hitIn && hitOut) witnessed++;
+  const v = witnessVerdict(f, deltas);
+  if (v.feeAdjusted) feeAdjusted++;
+  if (v.witnessed) witnessed++;
   else mismatched.push(`${f.signature.slice(0, 12)} in=${f.input} out=${f.output}`);
 }
 check('chain_witness', mismatched.length === 0 && witnessed > 0,
   `${witnessed}/${witnessSample.length} sampled ledger fills (seq order, sample of ${fills.length}) ` +
   `corroborated by the chain's token-balance deltas; mismatched=${mismatched.length} ` +
-  `unavailable=${unavailable}` +
+  `unavailable=${unavailable} fee_adjusted=${feeAdjusted} fee_fills_sampled=${feeFillsInSample}` +
   (mismatched.length ? `; contradiction: ${mismatched.slice(0, 3).join(' | ')}` : ''));
 
 // --- no guessed fills ------------------------------------------------------
@@ -404,7 +434,7 @@ const report = {
   window: win,
   naive: { polls, signatures_tracked: sigSlot.size, signatures_in_window: naiveInCount, txs_bought: bought, txs_with_trades: naive.size, skipped_failed, skipped_zero, errors, rpc_calls: rpcCalls.sigs + rpcCalls.tx },
   watcher: { rows: w.rows, fills: fills.length, rpc_calls: watcherCalls, decode_ms: watchMs },
-  chain_witness: { witnessed, mismatched: mismatched.length, unavailable, sampled: witnessSample.length, total_fills: fills.length, witness_limit: WITNESS_LIMIT, mismatched_detail: mismatched.slice(0, 10) },
+  chain_witness: { witnessed, mismatched: mismatched.length, unavailable, fee_adjusted: feeAdjusted, sampled: witnessSample.length, fee_fills_sampled: feeFillsInSample, total_fills: fills.length, witness_limit: WITNESS_LIMIT, fee_witness_limit: FEE_WITNESS_LIMIT, mismatched_detail: mismatched.slice(0, 10) },
   checks,
 };
 fs.writeFileSync(REPORT, JSON.stringify(report, null, 2));
