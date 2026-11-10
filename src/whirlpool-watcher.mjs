@@ -37,11 +37,30 @@
 
 import { spawn } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { tradesFromRow, WHIRLPOOL_PROGRAM } from './decode.mjs';
 
 const bigintReplacer = (_k, v) => (typeof v === 'bigint' ? v.toString() : v);
+
+// The consumer's refusal voice: `die` throws a named refusal that the CLI
+// turns into an exit code and a clean message instead of a stack trace.
+// Throwing is the contract: every mode turns a LedgerRefusal into an exit-3
+// refusal or a 503, so the mailbox keeps its at-least-once promise.
+// Swallowing it is the defect PULS M measured on the published reeflog
+// v0.7.14 seat (2026-11-10, research/consumer-ledger-durability-*.json):
+// a corrupt ledger was silently replaced by a fresh empty one behind a
+// COMPLETE report (F1), fills died with no report after the mailbox cursor
+// had advanced (F2), and the webhook answered 200 ok over an erased
+// history (F4).
+export function die(message) {
+  const err = new LedgerRefusal(message);
+  err.isRefusal = true;
+  throw err;
+}
+
+export class LedgerRefusal extends Error {}
 
 function cli(args) {
   return new Promise((resolve) => {
@@ -59,20 +78,144 @@ function cli(args) {
 
 // --- the ledger ------------------------------------------------------------
 
-export function loadLedger(file) {
-  try {
-    const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
-    return { fills: raw.fills || {}, retractions: raw.retractions || {}, meta: raw.meta || {} };
-  } catch {
-    return { fills: {}, retractions: {}, meta: {} };
+function shapeError(why, file) {
+  return new LedgerRefusal(`ledger ${file} ${why}; refusing to guess the history (repair or remove the file by hand — the file is UNCHANGED)`);
+}
+
+function checkLedgerShape(ledger, file) {
+  if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) {
+    throw shapeError('does not hold a JSON object', file);
   }
+  for (const key of ['fills', 'retractions', 'meta']) {
+    const v = ledger[key];
+    if (v === undefined) continue;
+    if (v === null || typeof v !== 'object' || Array.isArray(v)) {
+      throw shapeError(`holds \`${key}\` as ${Array.isArray(v) ? 'an array' : typeof v}, expected an object`, file);
+    }
+  }
+  return ledger;
+}
+
+export function loadLedger(file) {
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (err && err.code === 'ENOENT') {
+      // A missing file is the documented first run, not a corruption.
+      return { fills: {}, retractions: {}, meta: {} };
+    }
+    throw new LedgerRefusal(`ledger ${file} cannot be read: ${err && err.code ? err.code : err}; refusing to start without the history`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw shapeError(`does not parse as JSON (${String(err && err.message).split('\n')[0]})`, file);
+  }
+  const ledger = checkLedgerShape(parsed, file);
+  return {
+    fills: ledger.fills || {},
+    retractions: ledger.retractions || {},
+    meta: ledger.meta || {},
+  };
 }
 
 export function saveLedger(file, ledger) {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+  // Validate BEFORE anything is written: a bad shape must never reach the
+  // disk, not even briefly.
+  checkLedgerShape(ledger, file);
+  const dir = path.dirname(file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new LedgerRefusal(`ledger ${file} cannot be staged: cannot create ${dir}: ${err && err.code ? err.code : err}; refusing to run without the history`);
+  }
   const tmp = `${file}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(ledger, bigintReplacer, 2));
-  fs.renameSync(tmp, file);
+  let bytes;
+  try {
+    bytes = Buffer.from(JSON.stringify(ledger, bigintReplacer, 2));
+    const fd = fs.openSync(tmp, 'w');
+    try {
+      fs.writeFileSync(fd, bytes);
+      // Flush to the disk BEFORE the swap: the rename makes the file visible
+      // atomically, and this fsync makes the CONTENT survive a crash with it
+      // (the same contract reeflog v0.7.14 holds for its own cursor).
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    throw new LedgerRefusal(`ledger write ${file}: ${err && err.code ? err.code : err} — the ledger file is UNCHANGED and the fills printed this run will REDLIVER only if the mailbox has not advanced; refusing to pretend they were recorded`);
+  }
+  try {
+    fs.renameSync(tmp, file);
+  } catch (err) {
+    try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
+    throw new LedgerRefusal(`ledger write ${file}: rename failed: ${err && err.code ? err.code : err} — the ledger file is UNCHANGED; refusing to pretend the history was recorded`);
+  }
+  // Best-effort directory fsync, like reeflog's own cursor swap.
+  try {
+    const d = fs.openSync(dir, 'r');
+    try { fs.fsyncSync(d); } finally { fs.closeSync(d); }
+  } catch { /* best effort */ }
+}
+
+// Check that the ledger CAN be written BEFORE the mailbox is read. This is
+// the face the mailbox cannot protect: `reeflog tail` advances its cursor
+// when it prints rows, so a consumer that discovers "I cannot save" only
+// AFTER the spawn has already consumed delivery. Refusing before the spawn
+// keeps the cursor where it is, and the rows redeliver — the at-least-once
+// promise holds without needing the rescue file.
+//
+// The check touches NOTHING the ledger owns: it creates the directory like
+// saveLedger would, stages a probe temp and removes it, and — only when a
+// ledger FILE already exists — asks whether it is writable. An absent file
+// is the documented first run, not a refusal.
+export function ensureLedgerWritable(file) {
+  const dir = path.dirname(file);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    die(`ledger ${file} cannot be staged: cannot create ${dir}: ${err && err.code ? err.code : err} — refusing to read the mailbox BEFORE any row is consumed; the cursor is UNCHANGED and rows will REDLIVER once storage is writable`);
+  }
+  const probe = `${file}.writability-probe`;
+  try {
+    const fd = fs.openSync(probe, 'w');
+    fs.closeSync(fd);
+    fs.rmSync(probe, { force: true });
+  } catch (err) {
+    try { fs.rmSync(probe, { force: true }); } catch { /* best effort */ }
+    die(`ledger ${file} cannot be staged in ${dir}: ${err && err.code ? err.code : err} — refusing to read the mailbox BEFORE any row is consumed; the cursor is UNCHANGED and rows will REDLIVER once storage is writable`);
+  }
+  if (fs.existsSync(file)) {
+    try {
+      fs.accessSync(file, fs.constants.W_OK);
+    } catch (err) {
+      die(`ledger ${file} exists but is not writable: ${err && err.code ? err.code : err} — refusing to read the mailbox BEFORE any row is consumed; the cursor is UNCHANGED and rows will REDLIVER once the file is writable`);
+    }
+  }
+}
+
+// Park rows that were already CONSUMED by the mailbox so a ledger refusal
+// cannot silently drop them. The ledger directory may itself be the
+// unwritable thing, so the rescue file goes to the OS temp dir with the
+// ledger's basename embedded; the refusal names the exact path.
+export function parkRows(rows, ledgerPath) {
+  const base = path.basename(ledgerPath || 'ledger.json');
+  const file = path.join(os.tmpdir(), `whirlpool-watcher-rescue-${base}-${Date.now()}.jsonl`);
+  fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + (rows.length ? '\n' : ''));
+  return file;
+}
+
+// The refusal text for rows the mailbox already delivered (cursor advanced):
+// names the defect, the parked file, and the repair command.
+export function consumedRefusal(err, parked, rows, phase) {
+  return `ledger refused during ${phase}: ${err.message}\n` +
+    `${rows} delivered row(s) are parked at ${parked} — the mailbox cursor already advanced past them, so reeflog will NOT redeliver them\n` +
+    `repair the ledger storage, then replay the parked rows:\n` +
+    `  node src/cli.mjs rescue --file ${parked} --ledger <ledger>`;
 }
 
 // Turn one delivered row into ledger entries. `seq` is stored so a fill can
@@ -153,19 +296,48 @@ export function absorbRow(ledger, row) {
 // --- tail mode -------------------------------------------------------------
 
 export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, ledgerPath }) {
+  // Refuse BEFORE consuming anything (see ensureLedgerWritable): the
+  // strongest form of the contract is one where the mailbox never runs.
+  // The ledger is also READ before the spawn, so a corrupt ledger is
+  // refused while the cursor still points at every undelivered row — no
+  // rescue file is needed, the run simply never happened.
+  ensureLedgerWritable(ledgerPath);
+  let ledger;
+  try {
+    ledger = loadLedger(ledgerPath);
+  } catch (err) {
+    if (err instanceof LedgerRefusal) {
+      die(`refusing tail run: ${err.message} — the mailbox was NOT read and the cursor is UNCHANGED; repair or remove the ledger, then run again`);
+    }
+    throw err;
+  }
   const t = await cli([bin, 'tail', '--db', db, '--cursor', cursor, '--limit', String(limit)]);
   const lines = t.out.split('\n').filter(Boolean);
-  const ledger = loadLedger(ledgerPath);
-  let rows = 0, legs = 0, dupes = 0, invalid = 0;
+  const rows = [];
   for (const line of lines) {
     let row;
     try { row = JSON.parse(line); } catch { continue; }
-    rows++;
+    rows.push(row);
+  }
+  // Everything past this point means the mailbox has delivered: a save
+  // refusal now parks the rows in a rescue file instead of dropping them,
+  // because the cursor has already advanced.
+  let rowsN = 0, legs = 0, dupes = 0, invalid = 0;
+  for (const row of rows) {
+    rowsN++;
     const r = absorbRow(ledger, row);
     legs += r.fills; dupes += r.dupes; invalid += r.invalid;
   }
-  saveLedger(ledgerPath, ledger);
-  return { exit: t.code, stderr: t.err, rows, legs, dupes, invalid, ledger };
+  try {
+    saveLedger(ledgerPath, ledger);
+  } catch (err) {
+    if (err instanceof LedgerRefusal && rows.length) {
+      const parked = parkRows(rows, ledgerPath);
+      die(consumedRefusal(err, parked, rows.length, 'tail save'));
+    }
+    throw err;
+  }
+  return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, ledger };
 }
 
 // --- retraction join -------------------------------------------------------
@@ -192,9 +364,18 @@ export function applyRetractions(ledger, rows) {
 }
 
 export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 1000, ledgerPath }) {
+  ensureLedgerWritable(ledgerPath);
+  let ledger;
+  try {
+    ledger = loadLedger(ledgerPath);
+  } catch (err) {
+    if (err instanceof LedgerRefusal) {
+      die(`refusing retract run: ${err.message} — the mailbox was NOT read and the cursor is UNCHANGED; repair or remove the ledger, then run again`);
+    }
+    throw err;
+  }
   const t = await cli([bin, 'reorg', 'tail', '--db', db, '--cursor', cursor, '--limit', String(limit)]);
   const lines = t.out.split('\n').filter(Boolean);
-  const ledger = loadLedger(ledgerPath);
   const rows = [];
   for (const line of lines) {
     let row;
@@ -202,7 +383,17 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
     rows.push(row);
   }
   const retractions = applyRetractions(ledger, rows);
-  if (retractions.length) saveLedger(ledgerPath, ledger);
+  if (retractions.length) {
+    try {
+      saveLedger(ledgerPath, ledger);
+    } catch (err) {
+      if (err instanceof LedgerRefusal && rows.length) {
+        const parked = parkRows(rows, ledgerPath);
+        die(consumedRefusal(err, parked, rows.length, 'retract save'));
+      }
+      throw err;
+    }
+  }
   return { exit: t.code, stderr: t.err, retractions };
 }
 
@@ -239,7 +430,18 @@ export async function runWebhookReceiver({ port, secret, ledgerPath, log = () =>
         res.writeHead(400).end('bad json');
         return;
       }
-      const ledger = loadLedger(ledgerPath);
+      let ledger;
+      try {
+        ledger = loadLedger(ledgerPath);
+      } catch (err) {
+        // 503 = retry later: reeflog classifies it transient and HOLDS the
+        // queue, so the event redelivers once the ledger is repaired. A 200
+        // here would record a delivery receipt for a history that was never
+        // read — the F4 defect the measurement pins.
+        log({ refused: true, why: err.message });
+        res.writeHead(503).end(`ledger unreadable: ${String(err.message).replace(/\s+/g, ' ')}`);
+        return;
+      }
       if (payload.type === 'event') {
         const row = {
           seq: payload.seq,
@@ -250,12 +452,27 @@ export async function runWebhookReceiver({ port, secret, ledgerPath, log = () =>
           logs: payload.logs ?? null,
         };
         const r = absorbRow(ledger, row);
-        saveLedger(ledgerPath, ledger);
+        try {
+          saveLedger(ledgerPath, ledger);
+        } catch (err) {
+          // Same contract: a save failure is a refusal (503), never an ACK.
+          // The ledger file is unchanged (saveLedger stages a temp and only
+          // then swaps), so retrying after the repair is at-least-once safe.
+          log({ refused: true, why: err.message });
+          res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
+          return;
+        }
         log({ delivered: true, seq: payload.seq, fills: r.fills, dupes: r.dupes });
         res.writeHead(200).end('ok');
       } else if (payload.type === 'reorg') {
-        ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
-        saveLedger(ledgerPath, ledger);
+        try {
+          ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
+          saveLedger(ledgerPath, ledger);
+        } catch (err) {
+          log({ refused: true, why: err.message });
+          res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
+          return;
+        }
         log({ retraction: true, signature: payload.signature });
         res.writeHead(200).end('ok');
       } else {

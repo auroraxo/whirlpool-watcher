@@ -91,12 +91,58 @@ A line that is not a `Traded` event decodes to `other` (never a guessed fill); a
 `Traded` line with the wrong length decodes to `invalid` and is **reported** in the
 ledger, never dropped.
 
+## Ledger durability (the consumer-side contract)
+
+reeflog closes, release by release, every way a cursor or report can collapse a
+failure into "delivered" behind a healthy exit. This consumer holds the **same
+contract on its side of the mailbox** — a fill delivered by the mailbox is
+never lost:
+
+- **Refuses corrupt history (never swallows)**: a corrupt ledger file (torn
+  write, truncated JSON) is refused (`exit 3`), named, and left byte-identical
+  on disk. A fresh run does not quietly start from an empty ledger and does not
+  report `COMPLETE` over destroyed history.
+- **Pre-spawn writability check**: `watchTail` verifies the ledger directory
+  is writable **before** invoking `reeflog tail`. Because the mailbox advances
+  its cursor when it prints rows, discovering an unwritable storage only after
+  the spawn would permanently consume the rows without recording them; the
+  pre-check keeps the cursor untouched so the mailbox redelivers.
+- **Atomic fsync swap**: `saveLedger` stages into a sibling `.tmp` file, flushes
+  it to disk with `fsync`, and renames atomically over the target path, followed
+  by a best-effort directory fsync. A failed save leaves the existing ledger
+  untouched.
+- **Park on consumed refusal**: if a failure hits *after* the mailbox delivered
+  (the narrow window where the cursor already advanced), delivered rows are
+  parked in an OS-temp rescue file named in the refusal, and `node src/cli.mjs
+  rescue --file <path> --ledger <ledger>` replays them without an RPC call.
+- **Webhook refuses 503 (never 200)**: a corrupt or unwritable ledger on the
+  webhook path answers `503` so reeflog classifies the delivery transient and
+  holds the queue; answering 200 would record a delivery receipt for a fill
+  that is on no disk.
+
+Measured against the **published** `reeflog v0.7.14` linux asset (sha256 checked
+against the GitHub Release API digest):
+
+| Face | Baseline (658951c) | Fixed |
+|---|---|---|
+| F1: corrupt history replaced behind COMPLETE | VIOLATED (exit 0, emptied) | CLOSED (exit 3, file untouched) |
+| F2: unwritable dir after cursor advanced | VIOLATED (cursor moved, rows lost) | CLOSED (refuses before spawn, cursor untouched) |
+| F3 (guard): unwritable webhook holds queue | HELD (0 receipts) | HELD (0 receipts) |
+| F4: webhook ACKs corrupt overwrite | VIOLATED (200 ACK, emptied) | CLOSED (503 retry, file untouched) |
+| G1 (guard): missing ledger delivers clean | HELD (4 fills, exit 0) | HELD (4 fills, exit 0) |
+
+The measurement (`tools/measure-consumer-ledger-durability.mjs`), baseline and
+published artifacts (`research/consumer-ledger-durability-*.json`), and the
+mutation ladder (`tools/mutation-ladder-ledger-durability.sh`, 6/6 caught) are
+committed in the repository.
+
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 21 tests, no network
-REEFLOG_BIN=... node tools/e2e-whirlpool.mjs           # live mainnet comparison
-REEFLOG_BIN=... node tools/e2e-whirlpool.mjs --mutate  # must go RED
+node --test 'test/*.test.mjs'          # offline; 39 tests, no network
+bash tools/mutation-ladder-ledger-durability.sh  # 6 mutations, all must be CAUGHT
+node tools/e2e-whirlpool.mjs           # live mainnet comparison
+node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```
 
 The live E2E runs a classic direct-RPC poller and this watcher against the same

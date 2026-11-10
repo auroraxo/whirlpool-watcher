@@ -1,0 +1,71 @@
+{
+  "measured_at": "2026-11-10T19:18:59.786Z",
+  "what": "consumer-side mailbox contract: whirlpool-watcher ledger durability",
+  "seat": {
+    "kind": "published v0.7.14 asset",
+    "version": "reeflog 0.7.14",
+    "sha256": "9b6c30348f854af2acbd78ccbb474ae0837db1f34bd806626a7e2796bfe2611e",
+    "watcher_tree": "published"
+  },
+  "faces": [
+    {
+      "face": "F1_corrupt_history_erased_behind_complete",
+      "seed_fills": 4,
+      "second_run_exit": 0,
+      "verdict_reported": "COMPLETE",
+      "corrupt_bytes_preserved": false,
+      "fills_in_ledger_after": 0,
+      "violated": true,
+      "detail": "a corrupt ledger was replaced by a fresh empty one and the run reported COMPLETE with exit 0 — the delivered history is gone and nothing was said",
+      "stderr": "reeflog: 0 events after cursor 4 → cursor now 4"
+    },
+    {
+      "face": "F2_unwritable_ledger_after_cursor_advanced",
+      "exit": 1,
+      "report_printed": false,
+      "mailbox_cursor_after": 4,
+      "stdout": "",
+      "violated": true,
+      "closed_by_refusal_before_spawn": false,
+      "detail": "the run died (exit 1) with no report while the mailbox cursor had advanced to 4 — those fills are never redelivered",
+      "stderr": "node:fs:2482\n    return binding.writeFileUtf8(\n                   ^\n\nError: EACCES: permission denied, open '/tmp/pulse-m-E9UsBB/f2-ro/ledger.json.tmp'\n    at Object.writeFileSync (node:fs:2482:20)\n    at saveLedger (file:///tmp/pulse-m/baseline-src/src/whirlpool-watcher.mjs:74:6)\n    at watchTail (file:///tmp/pulse-m/baseline-src/src/whirlpool-watcher.mjs:167:3)\n    at process.processTicksAndReje"
+    },
+    {
+      "face": "F3_guard_webhook_unwritable_holds_queue",
+      "receiver_ready": true,
+      "push_exit": 3,
+      "webhook_receipts": 0,
+      "violated": false,
+      "detail": "receipts=0 push_exit=3 (queue held)"
+    },
+    {
+      "face": "F4_webhook_acks_corrupt_overwrite",
+      "receiver_ready": true,
+      "push_exit": 0,
+      "webhook_receipts": 4,
+      "corrupt_bytes_preserved": false,
+      "fills_in_ledger_after": 4,
+      "violated": true,
+      "detail": "the receiver answered 2xx and the mailbox recorded 4 receipt(s), replacing the corrupt ledger in silence — history erased behind an ACK the mailbox will honour forever"
+    },
+    {
+      "face": "G1_guard_fresh_ledger_delivers",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "fills": 4,
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violated_count": 3,
+    "violated": [
+      "F1_corrupt_history_erased_behind_complete",
+      "F2_unwritable_ledger_after_cursor_advanced",
+      "F4_webhook_acks_corrupt_overwrite"
+    ],
+    "expectation": "baseline tree: at least one face must violate",
+    "measurement_consistent": true
+  }
+}

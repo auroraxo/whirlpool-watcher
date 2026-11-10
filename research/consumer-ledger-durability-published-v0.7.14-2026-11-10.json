@@ -1,0 +1,67 @@
+{
+  "measured_at": "2026-11-10T19:18:46.860Z",
+  "what": "consumer-side mailbox contract: whirlpool-watcher ledger durability",
+  "seat": {
+    "kind": "published v0.7.14 asset",
+    "version": "reeflog 0.7.14",
+    "sha256": "9b6c30348f854af2acbd78ccbb474ae0837db1f34bd806626a7e2796bfe2611e",
+    "watcher_tree": "published"
+  },
+  "faces": [
+    {
+      "face": "F1_corrupt_history_erased_behind_complete",
+      "seed_fills": 4,
+      "second_run_exit": 3,
+      "verdict_reported": null,
+      "corrupt_bytes_preserved": true,
+      "fills_in_ledger_after": null,
+      "violated": false,
+      "detail": "exit=3 verdict=null preserved=true fills=null",
+      "stderr": "refusing tail run: ledger /tmp/pulse-m-rmzBu9/f1-ledger.json does not parse as JSON (Unexpected end of JSON input); refusing to guess the history (repair or remove the file by hand — the file is UNCHANGED) — the mailbox was NOT read and the cursor is UNCHANGED; repair or remove the ledger, then run again"
+    },
+    {
+      "face": "F2_unwritable_ledger_after_cursor_advanced",
+      "exit": 3,
+      "report_printed": false,
+      "mailbox_cursor_after": null,
+      "stdout": "",
+      "violated": false,
+      "closed_by_refusal_before_spawn": true,
+      "detail": "exit=3 cursor=null refused_before_spawn=true",
+      "stderr": "ledger /tmp/pulse-m-rmzBu9/f2-ro/ledger.json cannot be staged in /tmp/pulse-m-rmzBu9/f2-ro: EACCES — refusing to read the mailbox BEFORE any row is consumed; the cursor is UNCHANGED and rows will REDLIVER once storage is writable"
+    },
+    {
+      "face": "F3_guard_webhook_unwritable_holds_queue",
+      "receiver_ready": true,
+      "push_exit": 3,
+      "webhook_receipts": 0,
+      "violated": false,
+      "detail": "receipts=0 push_exit=3 (queue held)"
+    },
+    {
+      "face": "F4_webhook_acks_corrupt_overwrite",
+      "receiver_ready": true,
+      "push_exit": 3,
+      "webhook_receipts": 0,
+      "corrupt_bytes_preserved": true,
+      "fills_in_ledger_after": null,
+      "violated": false,
+      "detail": "receipts=0 preserved=true fills=null"
+    },
+    {
+      "face": "G1_guard_fresh_ledger_delivers",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "fills": 4,
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violated_count": 0,
+    "violated": [],
+    "expectation": "fixed tree: no face may violate",
+    "measurement_consistent": true
+  }
+}

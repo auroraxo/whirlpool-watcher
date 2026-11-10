@@ -18,8 +18,10 @@
 //       blocked retraction) — silence is not health
 //   2 = the consumer could not run at all (missing binary, bad arguments)
 import path from 'node:path';
+import fs from 'node:fs';
 import {
-  watchTail, watchRetractions, runWebhookReceiver, loadLedger,
+  watchTail, watchRetractions, runWebhookReceiver, loadLedger, saveLedger,
+  absorbRow, parkRows,
 } from './whirlpool-watcher.mjs';
 
 const arg = (k, d) => {
@@ -40,7 +42,16 @@ if (mode === 'tail') {
   const cursor = arg('--cursor', path.join('/tmp', 'whirlpool-cursor.txt'));
   const bin = arg('--bin', 'reeflog');
   if (!db) { console.error('tail needs --db'); process.exit(2); }
-  const r = await watchTail({ db, cursor, bin, limit: Number(arg('--limit', '5000')), ledgerPath });
+  let r;
+  try {
+    r = await watchTail({ db, cursor, bin, limit: Number(arg('--limit', '5000')), ledgerPath });
+  } catch (err) {
+    // A refusal is not a crash: exit 3 says "something is owed or refused",
+    // which is the same contract the mailbox uses. The message names the
+    // defect, the parked rows and the repair.
+    if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
+    throw err;
+  }
   // reeflog's own exit code carries the mailbox's verdict: 3 = the journal
   // still owes payloads (pending/unavailable). A consumer that ignores it
   // would report "no fills" as if that were a fact about the chain.
@@ -64,7 +75,13 @@ if (mode === 'retract') {
   const cursor = arg('--cursor', path.join('/tmp', 'whirlpool-reorg-cursor.txt'));
   const bin = arg('--bin', 'reeflog');
   if (!db) { console.error('retract needs --db'); process.exit(2); }
-  const r = await watchRetractions({ db, cursor, bin, ledgerPath });
+  let r;
+  try {
+    r = await watchRetractions({ db, cursor, bin, limit: Number(arg('--limit', '1000')), ledgerPath });
+  } catch (err) {
+    if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
+    throw err;
+  }
   const undoable = r.retractions.filter((x) => x.undoable_fills.length);
   report({
     mode: 'retract',
@@ -77,6 +94,51 @@ if (mode === 'retract') {
   if (r.stderr) console.error(r.stderr.trim());
   // A retraction that this consumer cannot act on is not health either.
   process.exit(r.exit === 3 ? 3 : 0);
+}
+
+// Rescue mode: absorb rows that were PARKED by a ledger refusal. The
+// mailbox had already advanced its cursor past them, so reeflog will not
+// redeliver them; this is the documented repair.
+if (mode === 'rescue') {
+  const file = arg('--file');
+  if (!file) { console.error('rescue needs --file'); process.exit(2); }
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (e) {
+    console.error(`rescue: cannot read ${file}: ${e.code || e}`);
+    process.exit(2);
+  }
+  const rows = raw.split('\n').filter(Boolean).map((l) => {
+    try { return JSON.parse(l); } catch { return null; }
+  }).filter(Boolean);
+  let ledger;
+  try {
+    ledger = loadLedger(ledgerPath);
+  } catch (err) {
+    if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
+    throw err;
+  }
+  let legs = 0, dupes = 0;
+  for (const row of rows) {
+    const r = absorbRow(ledger, row);
+    legs += r.fills; dupes += r.dupes;
+  }
+  try {
+    saveLedger(ledgerPath, ledger);
+  } catch (err) {
+    if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
+    throw err;
+  }
+  report({
+    mode: 'rescue',
+    parked_rows: rows.length,
+    fills: legs,
+    duplicates_ignored: dupes,
+    open_fills: Object.keys(ledger.fills).length,
+    verdict: 'COMPLETE',
+  });
+  process.exit(0);
 }
 
 if (mode === 'webhook') {
