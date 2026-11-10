@@ -1,0 +1,65 @@
+{
+  "measured_at": "2026-11-10T22:53:35.760Z",
+  "what": "the refusal named a repair (mergeLedger) that no CLI path could run — the consumer now performs it itself",
+  "seat": {
+    "kind": "watcher tree (the defect lives entirely in this repo)",
+    "watcher_commit": "a74594f",
+    "label": "baseline"
+  },
+  "faces": [
+    {
+      "face": "F1_tail_self_repair",
+      "slow_exit": 3,
+      "fast_exit": 0,
+      "merge_repair": null,
+      "final_fills": 2,
+      "parked_rescue": 1,
+      "slow_stderr": "ledger refused during tail save: ledger <tmpdir>/f1-ledger.json: this instance read the ledger as ABSENT, but a concurrent writer created it since — refusing to overwrite; the file is UNCHANGED; repair: load the current ledger, mergeLedger(disk, this view), then save again (rows this run ",
+      "violated": true,
+      "detail": "the slow instance ended at exit 3 with 2 durable fills and 1 parked file(s) — the named repair is not run by any CLI path, the history waits for a human"
+    },
+    {
+      "face": "F2_retract_self_repair",
+      "slow_exit": 3,
+      "fast_exit": 0,
+      "merge_repair": null,
+      "retracted_durable": false,
+      "retracted_resurrected_as_open": true,
+      "other_instance_fill_survived": true,
+      "parked_rescue": 1,
+      "slow_stderr": "ledger refused during retract save: ledger <tmpdir>/f2-ledger.json: the file changed on disk since this instance read it (another whirlpool-watcher instance saved concurrently) — refusing to overwrite; the file is UNCHANGED; repair: load the current ledger, mergeLedger(disk, this view), t",
+      "violated": true,
+      "detail": "the slow retract ended at exit 3: retracted=false resurrected=true other_fill=true — a retraction is a DELETION, a spread-union cannot express it"
+    },
+    {
+      "face": "F3_merge_keeps_reports",
+      "kept_disk_report": true,
+      "kept_other_side_report": false,
+      "shared_entry_duplicates": 1,
+      "invalid_events_kept_both": false,
+      "violated": true,
+      "detail": "the merge kept the fills but dropped the failure/invalid reports only one side had — the ledger lost the account of what went wrong"
+    },
+    {
+      "face": "G1_single_writer_guard",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "fills": 4,
+      "residue": [],
+      "parked_rescue": 0,
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4 merge_repair=undefined residue=none parked=0"
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "violated_count": 3,
+    "violated": [
+      "F1_tail_self_repair",
+      "F2_retract_self_repair",
+      "F3_merge_keeps_reports"
+    ],
+    "expectation": "baseline tree: at least one face must violate",
+    "measurement_consistent": true
+  }
+}

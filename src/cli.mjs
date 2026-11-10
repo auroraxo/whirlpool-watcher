@@ -63,10 +63,19 @@ if (mode === 'tail') {
     duplicates_ignored: r.dupes,
     invalid_events: r.invalid,
     open_fills: Object.keys(r.ledger.fills).length,
+    // PULS O: "applied" means this run hit a freshness clash and performed
+    // the repair its own refusal names (reload the durable copy, merge, save)
+    // — the fills of both instances are durable without a human rescue step.
+    // null means no clash happened; a refusal that could NOT be repaired
+    // ends in exit 3 with the rows parked, never here.
+    merge_repair: r.mergeRepaired ? 'applied' : null,
     mailbox_exit: r.exit,
     verdict: owed ? 'OWED' : 'COMPLETE',
   });
   if (r.stderr) console.error(r.stderr.trim());
+  // PULS O: a self-repaired clash is not an error, but it is not silence
+  // either — the operator must be able to see that two instances collided.
+  if (r.mergeNote) console.error(`whirlpool-watcher: merge repair applied after: ${r.mergeNote.replace(/\s+/g, ' ')}`);
   process.exit(owed ? 3 : 0);
 }
 
@@ -89,9 +98,11 @@ if (mode === 'retract') {
     undoable: undoable.length,
     undone_fills: undoable.reduce((n, x) => n + x.undoable_fills.length, 0),
     open_fills: Object.keys(loadLedger(ledgerPath).fills).length,
+    merge_repair: r.mergeRepaired ? 'applied' : null,
     mailbox_exit: r.exit,
   });
   if (r.stderr) console.error(r.stderr.trim());
+  if (r.mergeNote) console.error(`whirlpool-watcher: merge repair applied after: ${r.mergeNote.replace(/\s+/g, ' ')}`);
   // A retraction that this consumer cannot act on is not health either.
   process.exit(r.exit === 3 ? 3 : 0);
 }

@@ -268,11 +268,19 @@ test('G-N3: mergeLedger(disk, mine) unions both instances\u2019 fills, disk wins
 // Defect contract: whoever reports success must be durable. On the defect
 // tree both runs exit 0 and A's save silently reverts the ledger to A's
 // view — B's fills vanish behind two healthy reports.
-// On the fixed tree the stale instance refuses (exit 3, naming the
-// concurrent writer), parks its consumed rows for rescue, and the file
-// keeps B's durable state; rescue then replays A's rows into the CURRENT
-// ledger, so nothing is lost.
-test('C-N7: a late save over a newer ledger refuses, parks rows, exits 3; rescue merges', { timeout: 60000 }, (t) => {
+// On the fixed tree the stale instance REFUSES (the library-level refusal
+// is unchanged — the file stays byte-identical, PULS N's C-N2 pin still
+// holds) and the CLI then performs the repair that refusal names: it
+// reloads the durable copy, merges, and saves once. B's fills survive, A's
+// consumed rows are in the merged ledger, and NOTHING waits for a human.
+//
+// PULS O changed the END of this story: PULS N ended with exit 3 + a parked
+// rescue file, so the history was only complete if a human noticed the
+// parked file and ran `rescue`. The repair is now automatic, so the
+// expected end state changed: exit 0, `merge_repair: "applied"`, 4/4
+// fills durable, no parked file. The refusal itself is untouched — the
+// library still refuses a stale save (asserted below).
+test('C-N7: a late save over a newer ledger refuses, self-repairs, and ends durable', { timeout: 60000 }, (t) => {
   const d = tmpdir(t);
   const FIX = JSON.parse(fs.readFileSync(new URL('./fixtures.json', import.meta.url), 'utf8'));
   const ledger = path.join(d, 'ledger.json');
@@ -323,27 +331,33 @@ test('C-N7: a late save over a newer ledger refuses, parks rows, exits 3; rescue
       .filter((n) => n.startsWith('whirlpool-watcher-rescue-') && !rescueBefore.has(n));
 
     assert.equal(b.code, 0, `B (fast) must complete cleanly (${b.err})`);
-    assert.equal(a.code, 3,
-      `A's save found a ledger NEWER than its view and must refuse with exit 3 — got ${a.code}\nstderr: ${a.err}`);
+    assert.equal(a.code, 0,
+      `A must run the repair its own refusal names and end durable — got ${a.code}\nstderr: ${a.err}`);
     assert.match(a.err, /concurrent/i,
-      'A\u2019s refusal must name the concurrent writer');
+      'A\u2019s stderr must still name the concurrent writer it collided with');
+    const rep = JSON.parse(a.out.slice(a.out.indexOf('{')));
+    assert.equal(rep.merge_repair, 'applied',
+      'the report must say the freshness refusal was auto-repaired');
     for (const sig of bSigs) {
       assert.equal(finalSigs.includes(sig), true,
         'B\u2019s durable fills must survive A\u2019s late save');
     }
-    assert.equal(rescueNew.length, 1,
-      `A's consumed rows must be parked for rescue (found: ${rescueNew.join(', ') || 'none'})`);
-    const parked = fs.readFileSync(path.join(os.tmpdir(), rescueNew[0]), 'utf8')
-      .trim().split('\n').map((l) => JSON.parse(l));
-    assert.equal(parked.length, 2, 'both consumed rows must be in the rescue file');
+    assert.equal(rescueNew.length, 0,
+      'a self-repaired run must not park rows — rescue stays the fallback for a repair that could not be applied');
+    assert.equal(Object.keys(final.fills).length, 4,
+      'after the repair the ledger must hold BOTH instances\u2019 fills — nothing was lost');
 
-    const resc = spawnSync(process.execPath,
-      [CLI, 'rescue', '--file', path.join(os.tmpdir(), rescueNew[0]), '--ledger', ledger],
-      { encoding: 'utf8' });
-    assert.equal(resc.status, 0, `rescue must replay (${resc.stderr})`);
-    const merged = JSON.parse(fs.readFileSync(ledger, 'utf8'));
-    assert.equal(Object.keys(merged.fills).length, 4,
-      'after rescue the ledger must hold BOTH instances\u2019 fills — nothing was lost');
+    // The refusal itself is unchanged: the LIBRARY still refuses a stale
+    // save and leaves the file byte-identical (PULS N's C-N2 pin covers
+    // this too — asserted here so the auto-repair can never quietly
+    // weaken the refusal).
+    const stale = loadLedger(ledger);
+    saveLedger(ledger, { fills: { 'leg-A': { input: '1' } }, retractions: {}, meta: {} });
+    const before = fs.readFileSync(ledger, 'utf8');
+    assert.throws(() => saveLedger(ledger, stale),
+      (err) => err instanceof LedgerRefusal && /concurrent/i.test(err.message));
+    assert.equal(fs.readFileSync(ledger, 'utf8'), before,
+      'the refused library save must leave the file byte-identical');
   })();
 });
 

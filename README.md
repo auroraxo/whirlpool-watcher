@@ -165,11 +165,23 @@ The contract now:
   the concurrent writer, file byte-identical) when the disk no longer matches
   this instance's view — including the absent→present case of a first run
   racing another writer's first save.
-- **The named repair is a real merge**: `mergeLedger(disk, mine)` unions both
-  instances' fills and retractions with the durable disk copy winning per key;
-  on the CLI paths the refused instance parks its consumed rows for `rescue`,
-  which replays into the current ledger — measured end to end: slow instance
-  refuses with `exit 3`, fast instance's fills survive, rescue merges all four.
+- **The named repair is a real merge — and the consumer RUNS IT ITSELF**
+  (PULS O): `mergeLedger(disk, mine)` unions both instances' fills and
+  retractions with the durable disk copy winning per key; retractions WIN
+  over fills (a retraction is a deletion — a spread-union cannot express it,
+  so the other side's disk copy must not resurrect an undone fill); the meta
+  REPORTS (`failed_transactions`, `invalid_events`) are unioned by
+  `(seq, signature)` instead of being clobbered by the disk spread. When a
+  save hits a freshness clash, the CLI performs the repair its own refusal
+  names — reload the durable copy, merge, save once — reports
+  `merge_repair: "applied"` on stdout and the original refusal on stderr,
+  and exits 0 with BOTH instances' fills durable. `rescue` stays the
+  fallback for a repair that cannot be applied (storage broken, file gone)
+  and for rows a third writer raced during the merged save; it is
+  idempotent (a replayed row is counted as a duplicate, never recorded
+  twice). A freshness clash is the ONLY self-repairable failure: an
+  unwritable directory or a corrupt ledger is still refused, parked and
+  exited 3 (503 on the webhook) — merging cannot fix a broken disk.
 
 Measured with two REAL CLI instances racing one ledger
 (`tools/measure-ledger-concurrency.mjs`):
@@ -188,12 +200,42 @@ measurement still closes all faces). Mutation ladder
 `tools/mutation-ladder-ledger-concurrency.sh`: 7/7 caught, tree restored
 byte-identical.
 
+## Self-repair: the refusal runs its own named repair (PULS O)
+
+PULS N's refusal ended with "exit 3 + rows parked in an OS-temp file": the
+history was only complete if a HUMAN noticed the parked file and ran
+`rescue`, while the repair the refusal named (`mergeLedger`) was a library
+export no CLI path could invoke. Two further defects hid in that merge:
+the plain meta spread dropped every failure report only one side had, and a
+retracted fill resurrected as an open fill from the other side's disk copy.
+
+The contract now (`tools/measure-ledger-auto-repair.mjs`):
+
+| Face | Baseline (a74594f) | Fixed |
+|---|---|---|
+| F1: slow tail instance over a newer ledger | VIOLATED (exit 3, 2/4 fills, 1 parked file — waits for a human) | CLOSED (exit 0, `merge_repair: "applied"`, 4/4 fills, no parked file) |
+| F2: slow retract over a newer ledger | VIOLATED (exit 3; the retracted fill resurrects as open) | CLOSED (exit 0, retraction durable, never open again, other fill survives) |
+| F3: merge must keep both sides' reports | VIOLATED (disk spread dropped the other side's failure/invalid reports) | CLOSED (union by `(seq, signature)`, no duplicates) |
+| G1 (guard): single writer | HELD (4 fills, COMPLETE, `merge_repair: null`, no residue) | HELD |
+
+Pin: `test/ledger-auto-merge-repair.test.mjs` — MR1/MR2/MR3 RED on the
+pre-fix tree (a74594f), guards MG1/MG2/MG3 green on BOTH trees, 7/7 green
+after (MR4 pins the per-key rule PULS N's G-N3 already covered; both stay
+green on the pre-fix tree because that rule was never broken — their job is
+to catch a regression in the REWRITTEN merge). Mutation ladder `tools/mutation-ladder-ledger-auto-repair.sh`:
+6/6 caught, tree restored byte-identical. The PULS N pins stay green on
+this tree (C-N7's expected end state moved from "exit 3 + rescue" to
+"exit 0 + self-repair"; the library-level refusal it also asserts is
+unchanged).
+
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 49 tests, no network
+node --test 'test/*.test.mjs'          # offline; 56 tests, no network
 bash tools/mutation-ladder-ledger-durability.sh  # 6 mutations, all must be CAUGHT
 bash tools/mutation-ladder-ledger-concurrency.sh # 7 mutations, all must be CAUGHT
+bash tools/mutation-ladder-ledger-auto-repair.sh # 6 mutations, all must be CAUGHT
+node tools/measure-ledger-auto-repair.mjs --expect clean   # 0 faces violated
 node tools/e2e-whirlpool.mjs           # live mainnet comparison
 node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```
@@ -244,11 +286,21 @@ real, not their direction; that limit is pinned by the `LIMIT` test in
 - Retractions undo what **this** consumer read; if you share a ledger between
   consumers, dedup happens on (signature, pool, amounts), not on consumer identity.
 - Concurrency is detected, not arbitrated: a freshness refusal means two
-  instances RACED and the loser stopped without writing. Simultaneous saves
-  inside one read-check-write window can still interleave on the disk check
-  (the window is microseconds, and the loser then fails at the next save or
-  overwrites with its own now-stale content only if the check passed twice —
-  measured, not closed: run one instance per ledger, or merge on refusal).
+  instances RACED and the loser stops without overwriting. The loser now
+  self-repairs by merging (PULS O), which closes the lost-update *outcome*;
+  the check itself still sits BEFORE the stage, so a writer landing inside
+  the microseconds between check and rename can still interleave — in that
+  window the winner's bytes were written after the loser's read, and the
+  loser's merged save refuses again (rows then park for rescue, the
+  documented fallback). Measured limit, not closed: one instance per ledger
+  remains the operating rule; the merge makes a race non-destructive,
+  not impossible.
+- The self-repair only fires on the freshness refusal (`err.freshness`):
+  a stale view whose file CANNOT be re-read (deleted + corrupt) is not
+  mergeable and stays a refusal; the merge assumes both sides hold
+  at-least-once deliveries, so a ledger shared between two DIFFERENT
+  consumer identities still dedups on (signature, pool, amounts) — the
+  merge does not create fills either side never consumed.
 
 ## License
 

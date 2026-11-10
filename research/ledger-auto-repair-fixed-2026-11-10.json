@@ -1,0 +1,62 @@
+{
+  "measured_at": "2026-11-10T22:53:32.331Z",
+  "what": "the refusal named a repair (mergeLedger) that no CLI path could run — the consumer now performs it itself",
+  "seat": {
+    "kind": "watcher tree (the defect lives entirely in this repo)",
+    "watcher_commit": "a74594f",
+    "label": "fixed"
+  },
+  "faces": [
+    {
+      "face": "F1_tail_self_repair",
+      "slow_exit": 0,
+      "fast_exit": 0,
+      "merge_repair": "applied",
+      "final_fills": 4,
+      "parked_rescue": 0,
+      "slow_stderr": "whirlpool-watcher: merge repair applied after: ledger <tmpdir>/f1-ledger.json: this instance read the ledger as ABSENT, but a concurrent writer created it since — refusing to overwrite; the file is UNCHANGED; repair: load the current ledger, mergeLedger(disk, this view), then save again (",
+      "violated": false,
+      "detail": "slow_exit=0 fills=4 merge_repair=applied parked=0"
+    },
+    {
+      "face": "F2_retract_self_repair",
+      "slow_exit": 0,
+      "fast_exit": 0,
+      "merge_repair": "applied",
+      "retracted_durable": true,
+      "retracted_resurrected_as_open": false,
+      "other_instance_fill_survived": true,
+      "parked_rescue": 0,
+      "slow_stderr": "whirlpool-watcher: merge repair applied after: ledger <tmpdir>/f2-ledger.json: the file changed on disk since this instance read it (another whirlpool-watcher instance saved concurrently) — refusing to overwrite; the file is UNCHANGED; repair: load the current ledger, mergeLedger(disk, th",
+      "violated": false,
+      "detail": "slow_exit=0 retracted=true resurrected=false other=true"
+    },
+    {
+      "face": "F3_merge_keeps_reports",
+      "kept_disk_report": true,
+      "kept_other_side_report": true,
+      "shared_entry_duplicates": 1,
+      "invalid_events_kept_both": true,
+      "violated": false,
+      "detail": "disk=true mine=true dupes=1 invalid=true"
+    },
+    {
+      "face": "G1_single_writer_guard",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "merge_repair": null,
+      "fills": 4,
+      "residue": [],
+      "parked_rescue": 0,
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4 merge_repair=null residue=none parked=0"
+    }
+  ],
+  "summary": {
+    "total": 4,
+    "violated_count": 0,
+    "violated": [],
+    "expectation": "fixed tree: no face may violate",
+    "measurement_consistent": true
+  }
+}

@@ -176,6 +176,12 @@ function freshnessRefusal(file, why) {
   // Same convention as die(): the CLI maps this to exit 3 (tail/retract)
   // and the webhook maps it to 503, so the mailbox keeps what it owes.
   err.isRefusal = true;
+  // PULS O: a freshness clash is the ONE refusal the consumer can repair
+  // itself — the durable disk copy and this view can be merged without any
+  // human decision (the file is readable and writable; only the VIEW is
+  // old). Every other refusal (unwritable storage, corrupt history) is
+  // NOT repairable by merging and must stay a refusal.
+  err.freshness = true;
   return err;
 }
 
@@ -210,20 +216,106 @@ function checkFreshness(file, ledger) {
   }
 }
 
+// Meta entries that are REPORTS (lists), not maps. A spread-union over a
+// list keeps only one side's list: the durable disk copy's
+// `failed_transactions` replaced this instance's, so every failure report
+// only THIS side had was silently dropped by the merge — the ledger kept
+// the fills and lost the account of what went wrong. PULS O measured it
+// (MR2). These lists are unioned by (seq, signature): the same report seen
+// by both sides must not appear twice.
+const META_REPORT_LISTS = ['failed_transactions', 'invalid_events'];
+
+function reportKey(entry) {
+  if (!entry || typeof entry !== 'object') return String(entry);
+  return `${entry.seq}:${entry.signature}`;
+}
+
+function mergeMeta(diskMeta, myMeta) {
+  const merged = { ...myMeta, ...diskMeta };
+  for (const key of META_REPORT_LISTS) {
+    const diskList = Array.isArray(diskMeta?.[key]) ? diskMeta[key] : [];
+    const myList = Array.isArray(myMeta?.[key]) ? myMeta[key] : [];
+    if (!diskList.length && !myList.length) {
+      if (diskMeta?.[key] === undefined && myMeta?.[key] === undefined) delete merged[key];
+      continue;
+    }
+    const seen = new Map();
+    for (const e of diskList) seen.set(reportKey(e), e);
+    for (const e of myList) {
+      if (!seen.has(reportKey(e))) seen.set(reportKey(e), e);
+    }
+    merged[key] = [...seen.values()];
+  }
+  return merged;
+}
+
 // The documented repair for a freshness refusal: union of both instances'
 // fills and retractions, the DURABLE disk copy winning per key (it was
 // already delivered to whoever consumed the ledger). The result keeps the
 // disk view's freshness, so saving it re-checks against the same state —
 // a writer that landed in between still refuses.
+//
+// PULS O: two rules this merge was missing, both measured:
+//   * a retraction is a DELETION of a fill. A spread-union cannot express
+//     that — the disk copy's fill would resurrect a key the other side
+//     retracted (MR3). Retractions win over fills.
+//   * the meta REPORTS are lists, not maps: a plain spread kept only the
+//     disk side and dropped every failure/invalid report only this side
+//     had (MR2).
 export function mergeLedger(diskLedger, mine) {
+  const fills = { ...mine.fills, ...diskLedger.fills };
+  const retractions = { ...mine.retractions, ...diskLedger.retractions };
+  // Retractions win: a key either side undid is not an open fill.
+  for (const key of Object.keys(retractions)) delete fills[key];
   const merged = {
-    fills: { ...mine.fills, ...diskLedger.fills },
-    retractions: { ...mine.retractions, ...diskLedger.retractions },
-    meta: { ...mine.meta, ...diskLedger.meta },
+    fills,
+    retractions,
+    meta: mergeMeta(diskLedger.meta || {}, mine.meta || {}),
   };
   const marker = Object.getOwnPropertyDescriptor(diskLedger, LOADED_MARKER);
   if (marker) Object.defineProperty(merged, LOADED_MARKER, marker);
   return merged;
+}
+
+// PULS O — the refusal named this repair, so the consumer performs it
+// ITSELF instead of waiting for a human to notice a parked file.
+//
+// The freshness refusal is the one failure where both sides are known and
+// mergeable: the durable disk copy and this instance's view. Merging them
+// loses nothing (the disk copy wins per key, this side's unique fills are
+// added, retractions win over fills) and keeps the at-least-once promise:
+// the rows this run consumed ARE in the merged ledger.
+//
+// Anything else stays a refusal: an unwritable directory or a corrupt
+// ledger cannot be merged away — those keep the PULS M contract (refuse,
+// park, exit 3 / 503).
+//
+// Returns {repaired: bool, ledger}. On a second refusal (a third writer
+// landed between the reload and the save) the refusal propagates: the
+// caller then parks the rows, exactly as before.
+export function saveLedgerWithRepair(file, ledger) {
+  try {
+    saveLedger(file, ledger);
+    return { repaired: false, ledger };
+  } catch (err) {
+    if (!(err instanceof LedgerRefusal) || !err.freshness) throw err;
+    let disk;
+    try {
+      disk = loadLedger(file);
+    } catch {
+      // The current file cannot even be read — merging is impossible.
+      throw err;
+    }
+    const merged = mergeLedger(disk, ledger);
+    // saveLedger re-checks freshness against the DISK bytes we just read
+    // (the merge carries that marker), so this refuses too if a third
+    // writer landed in between.
+    saveLedger(file, merged);
+    // The original refusal is returned so the CLI can NAME what happened:
+    // a repair an operator never hears about is a silent concurrency
+    // event, and silence is never health.
+    return { repaired: true, ledger: merged, note: err.message };
+  }
 }
 
 export function saveLedger(file, ledger) {
@@ -437,16 +529,23 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
     rows.push(row);
   }
   // Everything past this point means the mailbox has delivered: a save
-  // refusal now parks the rows in a rescue file instead of dropping them,
-  // because the cursor has already advanced.
+  // refusal now either self-repairs (a freshness clash: the durable disk
+  // copy and this view are mergeable — PULS O) or parks the rows in a
+  // rescue file (storage/corruption failures), because the cursor has
+  // already advanced.
   let rowsN = 0, legs = 0, dupes = 0, invalid = 0;
   for (const row of rows) {
     rowsN++;
     const r = absorbRow(ledger, row);
     legs += r.fills; dupes += r.dupes; invalid += r.invalid;
   }
+  let mergeRepaired = false;
+  let mergeNote = null;
   try {
-    saveLedger(ledgerPath, ledger);
+    const res = saveLedgerWithRepair(ledgerPath, ledger);
+    mergeRepaired = res.repaired;
+    mergeNote = res.note || null;
+    ledger = res.ledger;
   } catch (err) {
     if (err instanceof LedgerRefusal && rows.length) {
       const parked = parkRows(rows, ledgerPath);
@@ -454,7 +553,7 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
     }
     throw err;
   }
-  return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, ledger };
+  return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, mergeRepaired, mergeNote, ledger };
 }
 
 // --- retraction join -------------------------------------------------------
@@ -500,9 +599,13 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
     rows.push(row);
   }
   const retractions = applyRetractions(ledger, rows);
+  let mergeRepaired = false;
+  let mergeNote = null;
   if (retractions.length) {
     try {
-      saveLedger(ledgerPath, ledger);
+      const res = saveLedgerWithRepair(ledgerPath, ledger);
+      mergeRepaired = res.repaired;
+      mergeNote = res.note || null;
     } catch (err) {
       if (err instanceof LedgerRefusal && rows.length) {
         const parked = parkRows(rows, ledgerPath);
@@ -511,7 +614,7 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
       throw err;
     }
   }
-  return { exit: t.code, stderr: t.err, retractions };
+  return { exit: t.code, stderr: t.err, retractions, mergeRepaired, mergeNote };
 }
 
 // --- webhook mode ----------------------------------------------------------
@@ -569,22 +672,25 @@ export async function runWebhookReceiver({ port, secret, ledgerPath, log = () =>
           logs: payload.logs ?? null,
         };
         const r = absorbRow(ledger, row);
+        let repaired = false;
         try {
-          saveLedger(ledgerPath, ledger);
+          repaired = saveLedgerWithRepair(ledgerPath, ledger).repaired;
         } catch (err) {
           // Same contract: a save failure is a refusal (503), never an ACK.
-          // The ledger file is unchanged (saveLedger stages a temp and only
-          // then swaps), so retrying after the repair is at-least-once safe.
+          // A freshness clash self-repairs first (PULS O); if even the
+          // merged save refuses, the delivery stays owed.
           log({ refused: true, why: err.message });
           res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
           return;
         }
         log({ delivered: true, seq: payload.seq, fills: r.fills, dupes: r.dupes });
+        log({ delivered: true, seq: payload.seq, fills: r.fills, dupes: r.dupes,
+          ...(repaired ? { merge_repair: 'applied' } : {}) });
         res.writeHead(200).end('ok');
       } else if (payload.type === 'reorg') {
         try {
           ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
-          saveLedger(ledgerPath, ledger);
+          saveLedgerWithRepair(ledgerPath, ledger);
         } catch (err) {
           log({ refused: true, why: err.message });
           res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
