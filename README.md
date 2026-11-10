@@ -136,11 +136,64 @@ published artifacts (`research/consumer-ledger-durability-*.json`), and the
 mutation ladder (`tools/mutation-ladder-ledger-durability.sh`, 6/6 caught) are
 committed in the repository.
 
+## Ledger concurrency (one ledger file, one instance — or refuse, never revert)
+
+Durability without concurrency is half a contract. Two watcher instances
+pointed at the SAME `--ledger` path (a cron overlap, a retry loop, a second
+terminal — or one crashed instance's leftover temp file) used to destroy each
+other's history in silence:
+
+- **Fixed staging names collided**: `saveLedger` staged into `${file}.tmp` and
+  the writability probe used `${file}.writability-probe` — fixed names shared
+  by every instance. A second writer's rename stole the first writer's staged
+  file; a foreign `.tmp` was opened with `'w'` (its bytes destroyed) and then
+  renamed over the ledger.
+- **The lost update**: a save never checked whether the file had changed since
+  *this instance* read it. Instance A (slow mailbox) exits 0 after instance B
+  (fast) already made its fills durable — A's save silently reverts the file
+  to A's older view, and B's fills vanish behind two healthy reports.
+
+The contract now:
+
+- **Per-process staging**: the temp and probe files carry this process's pid
+  (`${file}.${pid}.tmp`, `${file}.${pid}.writability-probe`); no two writers
+  ever open the same temp path, and a foreign file is never adopted or
+  destroyed. The same torn-write window PULS L closed for the reeflog cursor
+  (O_TRUNC-then-write), closed here on the consumer side.
+- **Freshness refusal, not revert**: `loadLedger` remembers the exact bytes it
+  read; `saveLedger` re-reads the file and REFUSES (`exit 3`, message names
+  the concurrent writer, file byte-identical) when the disk no longer matches
+  this instance's view — including the absent→present case of a first run
+  racing another writer's first save.
+- **The named repair is a real merge**: `mergeLedger(disk, mine)` unions both
+  instances' fills and retractions with the durable disk copy winning per key;
+  on the CLI paths the refused instance parks its consumed rows for `rescue`,
+  which replays into the current ledger — measured end to end: slow instance
+  refuses with `exit 3`, fast instance's fills survive, rescue merges all four.
+
+Measured with two REAL CLI instances racing one ledger
+(`tools/measure-ledger-concurrency.mjs`):
+
+| Face | Baseline (f604cf3) | Fixed |
+|---|---|---|
+| F1: two instances, one ledger (slow saves last) | VIOLATED (both exit 0, fast run's fills erased) | CLOSED (slow refuses exit 3, fills survive, rescue → 4/4) |
+| F2: foreign `ledger.json.tmp` clobbered by a save | VIOLATED (renamed away) | CLOSED (bytes intact) |
+| F3: foreign writability probe clobbered | VIOLATED (destroyed) | CLOSED (bytes intact) |
+| F4: stale view saves over a newer file | VIOLATED (silent revert) | CLOSED (refusal, file unchanged) |
+| G1 (guard): single writer delivers clean | HELD (4 fills, exit 0) | HELD (4 fills, exit 0, no residue) |
+
+Pin: `test/ledger-concurrency.test.mjs` — 7 defect tests RED on the pre-fix
+tree (f604cf3), 10/10 green after; the PULS M pins stay green (the durability
+measurement still closes all faces). Mutation ladder
+`tools/mutation-ladder-ledger-concurrency.sh`: 7/7 caught, tree restored
+byte-identical.
+
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 39 tests, no network
+node --test 'test/*.test.mjs'          # offline; 49 tests, no network
 bash tools/mutation-ladder-ledger-durability.sh  # 6 mutations, all must be CAUGHT
+bash tools/mutation-ladder-ledger-concurrency.sh # 7 mutations, all must be CAUGHT
 node tools/e2e-whirlpool.mjs           # live mainnet comparison
 node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```
@@ -190,6 +243,12 @@ real, not their direction; that limit is pinned by the `LIMIT` test in
   put TLS and auth in front of it before exposing it beyond localhost.
 - Retractions undo what **this** consumer read; if you share a ledger between
   consumers, dedup happens on (signature, pool, amounts), not on consumer identity.
+- Concurrency is detected, not arbitrated: a freshness refusal means two
+  instances RACED and the loser stopped without writing. Simultaneous saves
+  inside one read-check-write window can still interleave on the disk check
+  (the window is microseconds, and the loser then fails at the next save or
+  overwrites with its own now-stale content only if the check passed twice —
+  measured, not closed: run one instance per ledger, or merge on refusal).
 
 ## License
 

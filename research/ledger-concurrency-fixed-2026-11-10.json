@@ -1,0 +1,62 @@
+{
+  "measured_at": "2026-11-10T22:04:46.615Z",
+  "what": "consumer-side concurrency: two whirlpool-watcher instances, one ledger file",
+  "seat": {
+    "kind": "watcher tree (the defect lives entirely in this repo)",
+    "watcher_commit": "f604cf3",
+    "label": "fixed"
+  },
+  "faces": [
+    {
+      "face": "F1_two_instances_one_ledger",
+      "slow_exit": 3,
+      "fast_exit": 0,
+      "b_fills_survived_slow_save": true,
+      "final_fills": 2,
+      "parked_rescue": 1,
+      "fills_after_rescue": 4,
+      "slow_stderr": "ledger refused during tail save: ledger /tmp/pulse-n-HdjN2S/f1-ledger.json: this instance read the ledger as ABSENT, but a concurrent writer created it since — refusing to overwrite; the file is UNCHANGED; repair: load the current ledger, mergeLedger(disk, this view), then save again (rows this run consumed are parked for `node src/cli.mjs rescue`)\n2 delivered row(s) are parked at /tmp/whirlpool-w",
+      "violated": false,
+      "detail": "slow_exit=3 fast_exit=0 b_survived=true rescue=1 repaired=4"
+    },
+    {
+      "face": "F2_foreign_stage_clobber",
+      "exit": 0,
+      "foreign_tmp_intact": true,
+      "ledger_written": true,
+      "violated": false,
+      "detail": "exit=0 intact=true ledger=true"
+    },
+    {
+      "face": "F3_foreign_probe_clobber",
+      "exit": 0,
+      "foreign_probe_intact": true,
+      "violated": false,
+      "detail": "exit=0 intact=true"
+    },
+    {
+      "face": "F4_stale_view_save",
+      "refused": true,
+      "file_unchanged": true,
+      "leg_a_survived": true,
+      "violated": false,
+      "detail": "refused=true unchanged=true"
+    },
+    {
+      "face": "G1_single_writer_guard",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "fills": 4,
+      "residue": [],
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4 residue=none"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violated_count": 0,
+    "violated": [],
+    "expectation": "fixed tree: no face may violate",
+    "measurement_consistent": true
+  }
+}

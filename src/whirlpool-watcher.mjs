@@ -98,40 +98,153 @@ function checkLedgerShape(ledger, file) {
 
 export function loadLedger(file) {
   let raw;
+  let existed = true;
   try {
     raw = fs.readFileSync(file, 'utf8');
   } catch (err) {
     if (err && err.code === 'ENOENT') {
       // A missing file is the documented first run, not a corruption.
-      return { fills: {}, retractions: {}, meta: {} };
+      existed = false;
+    } else {
+      throw new LedgerRefusal(`ledger ${file} cannot be read: ${err && err.code ? err.code : err}; refusing to start without the history`);
     }
-    throw new LedgerRefusal(`ledger ${file} cannot be read: ${err && err.code ? err.code : err}; refusing to start without the history`);
   }
-  let parsed;
+  let ledger;
+  if (!existed) {
+    ledger = { fills: {}, retractions: {}, meta: {} };
+  } else {
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      throw shapeError(`does not parse as JSON (${String(err && err.message).split('\n')[0]})`, file);
+    }
+    ledger = checkLedgerShape(parsed, file);
+    ledger = {
+      fills: ledger.fills || {},
+      retractions: ledger.retractions || {},
+      meta: ledger.meta || {},
+    };
+  }
+  // PULS N: remember WHAT was on disk when this instance read it, so a
+  // later save can prove its view is still current. Non-enumerable: it is
+  // bookkeeping, never serialized content.
+  Object.defineProperty(ledger, LOADED_MARKER, {
+    value: existed ? raw : null,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return ledger;
+}
+
+// The freshness marker key (non-enumerable on every ledger loadLedger
+// returns). It holds the exact disk bytes at read time, or null when the
+// file did not exist (documented first run).
+const LOADED_MARKER = '__onDiskAtLoad';
+
+// PULS N — one watcher instance per ledger file, or the history is someone
+// else's guess. Two faces, measured on the pre-fix tree (7 RED pins in
+// test/ledger-concurrency.test.mjs):
+//   * the stage/probe files carried FIXED names (`${file}.tmp`,
+//     `${file}.writability-probe`): two instances (or a crashed older one)
+//     opened the same temp by name — one instance's rename stole the other's
+//     staged file, and the survivor wrote foreign bytes over the payload.
+//     The same torn-write window PULS L closed for the reeflog cursor,
+//     reopened on the consumer side by naming the temp after the payload.
+//   * a save never checked whether the file changed since THIS instance
+//     read it: a late writer silently reverted the ledger to an older
+//     history behind its own exit 0 — the lost update.
+// The repair contract: pid-unique staging (no two writers ever share a temp
+// path), a freshness refusal that names the concurrent writer and promises
+// the file is UNCHANGED, and a real merge (mergeLedger) as the named fix.
+function markLoaded(diskBytes, ledger) {
+  Object.defineProperty(ledger, LOADED_MARKER, {
+    value: diskBytes,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return ledger;
+}
+
+function freshnessRefusal(file, why) {
+  const err = new LedgerRefusal(
+    `ledger ${file}: ${why} — refusing to overwrite; the file is UNCHANGED; ` +
+    'repair: load the current ledger, mergeLedger(disk, this view), then save again ' +
+    '(rows this run consumed are parked for `node src/cli.mjs rescue`)');
+  // Same convention as die(): the CLI maps this to exit 3 (tail/retract)
+  // and the webhook maps it to 503, so the mailbox keeps what it owes.
+  err.isRefusal = true;
+  return err;
+}
+
+function checkFreshness(file, ledger) {
+  const expected = ledger[LOADED_MARKER];
+  if (expected === undefined) {
+    // A hand-built object never came from loadLedger: nothing to compare
+    // against. The product paths (tail/retract/webhook/rescue) ALWAYS load
+    // before saving, so the measured lost-update faces are all marked —
+    // refusing here would break documented construction, not clobbering.
+    return;
+  }
+  let current;
+  let exists = true;
   try {
-    parsed = JSON.parse(raw);
+    current = fs.readFileSync(file, 'utf8');
   } catch (err) {
-    throw shapeError(`does not parse as JSON (${String(err && err.message).split('\n')[0]})`, file);
+    if (err && err.code === 'ENOENT') { exists = false; } else { return; }
   }
-  const ledger = checkLedgerShape(parsed, file);
-  return {
-    fills: ledger.fills || {},
-    retractions: ledger.retractions || {},
-    meta: ledger.meta || {},
+  const state = expected === null ? 'absent' : 'present';
+  if (state === 'absent' && exists) {
+    throw freshnessRefusal(file,
+      'this instance read the ledger as ABSENT, but a concurrent writer created it since');
+  }
+  if (state === 'present' && !exists) {
+    throw freshnessRefusal(file,
+      'this instance read the ledger as present, but it is gone from disk (removed concurrently)');
+  }
+  if (state === 'present' && current !== expected) {
+    throw freshnessRefusal(file,
+      'the file changed on disk since this instance read it (another whirlpool-watcher instance saved concurrently)');
+  }
+}
+
+// The documented repair for a freshness refusal: union of both instances'
+// fills and retractions, the DURABLE disk copy winning per key (it was
+// already delivered to whoever consumed the ledger). The result keeps the
+// disk view's freshness, so saving it re-checks against the same state —
+// a writer that landed in between still refuses.
+export function mergeLedger(diskLedger, mine) {
+  const merged = {
+    fills: { ...mine.fills, ...diskLedger.fills },
+    retractions: { ...mine.retractions, ...diskLedger.retractions },
+    meta: { ...mine.meta, ...diskLedger.meta },
   };
+  const marker = Object.getOwnPropertyDescriptor(diskLedger, LOADED_MARKER);
+  if (marker) Object.defineProperty(merged, LOADED_MARKER, marker);
+  return merged;
 }
 
 export function saveLedger(file, ledger) {
   // Validate BEFORE anything is written: a bad shape must never reach the
   // disk, not even briefly.
   checkLedgerShape(ledger, file);
+  // PULS N: refuse a stale view BEFORE staging anything. The file is read
+  // (never written) here; a refusal leaves it byte-identical.
+  checkFreshness(file, ledger);
   const dir = path.dirname(file);
   try {
     fs.mkdirSync(dir, { recursive: true });
   } catch (err) {
     throw new LedgerRefusal(`ledger ${file} cannot be staged: cannot create ${dir}: ${err && err.code ? err.code : err}; refusing to run without the history`);
   }
-  const tmp = `${file}.tmp`;
+  // Stage under a name UNIQUE to this process: a fixed sibling made two
+  // instances of this watcher open, truncate and swap the SAME temp —
+  // one rename stole the other's staged file and the survivor wrote it
+  // back over the payload (the C-N1 torn ledger). pid + file: no two
+  // writers of the same ledger path ever share a temp path.
+  const tmp = `${file}.${process.pid}.tmp`;
   let bytes;
   try {
     bytes = Buffer.from(JSON.stringify(ledger, bigintReplacer, 2));
@@ -155,6 +268,10 @@ export function saveLedger(file, ledger) {
     try { fs.rmSync(tmp, { force: true }); } catch { /* best effort */ }
     throw new LedgerRefusal(`ledger write ${file}: rename failed: ${err && err.code ? err.code : err} — the ledger file is UNCHANGED; refusing to pretend the history was recorded`);
   }
+  // This instance now owns exactly these bytes on disk: refresh the mark so
+  // its NEXT save re-checks against reality instead of refusing on its own
+  // write (single-writer sequences must stay legal).
+  markLoaded(bytes.toString('utf8'), ledger);
   // Best-effort directory fsync, like reeflog's own cursor swap.
   try {
     const d = fs.openSync(dir, 'r');
@@ -180,7 +297,7 @@ export function ensureLedgerWritable(file) {
   } catch (err) {
     die(`ledger ${file} cannot be staged: cannot create ${dir}: ${err && err.code ? err.code : err} — refusing to read the mailbox BEFORE any row is consumed; the cursor is UNCHANGED and rows will REDLIVER once storage is writable`);
   }
-  const probe = `${file}.writability-probe`;
+  const probe = `${file}.${process.pid}.writability-probe`;
   try {
     const fd = fs.openSync(probe, 'w');
     fs.closeSync(fd);

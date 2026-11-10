@@ -72,7 +72,7 @@ test('C2: a tail run with a corrupt ledger refuses BEFORE the mailbox is read', 
   // the real one (the advance is the whole hazard: rows printed are rows
   // consumed).
   const bin = path.join(d, 'fake-reeflog');
-  fs.writeFileSync(bin, `#!/bin/sh\ntouch ${marker}\nprintf '1\\n' > "$4"\nexit 0\n`);
+  fs.writeFileSync(bin, `#!/bin/sh\ntouch ${marker}\nprintf '1\\n' > "$5"\nexit 0\n`);
   fs.chmodSync(bin, 0o755);
 
   const r = spawnSync(process.execPath, [CLI, 'tail', '--db', path.join(d, 'j.db'),
@@ -206,7 +206,7 @@ test('C5: a healthy tail run delivers, reports COMPLETE, and exits 0', (t) => {
     logs: [`Program data: ${FIX.traded[0].program_data}`],
   };
   const bin = path.join(d, 'fake-reeflog');
-  fs.writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(row).replace(/'/g, "'\\''")}'\nprintf '1\\n' > "$4"\nexit 0\n`);
+  fs.writeFileSync(bin, `#!/bin/sh\nprintf '%s\\n' '${JSON.stringify(row).replace(/'/g, "'\\''")}'\nprintf '1\\n' > "$5"\nexit 0\n`);
   fs.chmodSync(bin, 0o755);
   const ledgerFile = path.join(d, 'ledger.json');
   const r = spawnSync(process.execPath, [CLI, 'tail', '--db', path.join(d, 'j.db'),

@@ -1,0 +1,67 @@
+{
+  "measured_at": "2026-11-10T22:04:48.599Z",
+  "what": "consumer-side concurrency: two whirlpool-watcher instances, one ledger file",
+  "seat": {
+    "kind": "watcher tree (the defect lives entirely in this repo)",
+    "watcher_commit": "f604cf3",
+    "label": "baseline"
+  },
+  "faces": [
+    {
+      "face": "F1_two_instances_one_ledger",
+      "slow_exit": 0,
+      "fast_exit": 0,
+      "b_fills_survived_slow_save": false,
+      "final_fills": 2,
+      "parked_rescue": 0,
+      "fills_after_rescue": null,
+      "slow_stderr": "",
+      "violated": true,
+      "detail": "the slow instance exited 0 and reverted the ledger to its own older view — the fast instance fills are gone behind two healthy reports"
+    },
+    {
+      "face": "F2_foreign_stage_clobber",
+      "exit": 0,
+      "foreign_tmp_intact": false,
+      "ledger_written": true,
+      "violated": true,
+      "detail": "a save staged into the FIXED sibling name and renamed the foreign temp away — two instances collide on one temp path"
+    },
+    {
+      "face": "F3_foreign_probe_clobber",
+      "exit": 0,
+      "foreign_probe_intact": false,
+      "violated": true,
+      "detail": "the writability probe used a FIXED sibling name: a concurrent instance opened the foreign probe with 'w' and removed it"
+    },
+    {
+      "face": "F4_stale_view_save",
+      "refused": false,
+      "file_unchanged": false,
+      "leg_a_survived": false,
+      "violated": true,
+      "detail": "a save over a file newer than this instance’s view succeeded: the on-disk history was reverted with no refusal"
+    },
+    {
+      "face": "G1_single_writer_guard",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "fills": 4,
+      "residue": [],
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE fills=4 residue=none"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violated_count": 4,
+    "violated": [
+      "F1_two_instances_one_ledger",
+      "F2_foreign_stage_clobber",
+      "F3_foreign_probe_clobber",
+      "F4_stale_view_save"
+    ],
+    "expectation": "baseline tree: at least one face must violate",
+    "measurement_consistent": true
+  }
+}
