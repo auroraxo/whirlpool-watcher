@@ -49,8 +49,13 @@ EOF
 reeflog start --db reeflog.db --webhook-config webhooks.json --webhook-every 5
 ```
 
-Exit codes follow reeflog's discipline: `0` complete, `3` something is owed or refused
-(pending payloads, unverifiable events) — silence is never health.
+Exit codes follow reeflog's discipline: `0` complete, `2` the consumer could
+not run at all (a missing mailbox binary), `3` something is owed or refused
+(pending payloads, unverifiable events, a mailbox that refused) — silence is
+never health. The report's `verdict` field is the **mailbox's** verdict,
+carried: `COMPLETE` (reeflog exit 0), `OWED` (exit 3), `REFUSED` (any other
+exit, e.g. reeflog's named refusals exit 1), `UNAVAILABLE` (the mailbox never
+ran) — see "The mailbox verdict is carried, never stamped" below.
 
 ## What a fill looks like
 
@@ -228,14 +233,70 @@ this tree (C-N7's expected end state moved from "exit 3 + rescue" to
 "exit 0 + self-repair"; the library-level refusal it also asserts is
 unchanged).
 
+## The mailbox verdict is carried, never stamped (PULS P)
+
+Everything above protects the LEDGER. This section protects the one mouth
+left: the `verdict` field and the exit code of a run whose MAILBOX never
+really ran. Hand-measured 2026-11-11 against the **published reeflog v0.7.14**
+binary (linux asset sha256 `9b6c3034…` == the GitHub Release API digest, the
+tree-local build `a50facf1…`): every one of these faces printed
+`"verdict": "COMPLETE"` with watcher exit 0:
+
+- `tail` over a db with **no journal** — reeflog refuses (exit 1) and names
+  the repair (`reeflog init --db … --program <pubkey>`). Nothing about the
+  chain was checked; the watcher said COMPLETE.
+- `tail` with a **missing reeflog binary** — the spawn fails, `mailbox_exit`
+  is `null` (the strongest "we know nothing") — COMPLETE, exit 0.
+- `tail` whose **cursor belongs to another journal** — reeflog's own v0.7.13
+  provenance gate refuses by name (`does not belong here`). The mailbox's
+  refusal vanished into a healthy report — and the save still MINTED a
+  `{fills:{}}` ledger, first-run state from a run that never happened
+  (PULS M's guarantee was the opposite).
+- `retract` over a refusing mailbox — exit 0 with an empty retraction list
+  read as health.
+
+The fix is one rule: **the CLI has no verdict of its own.** `verdict` is
+reeflog's exit code read verbatim (`0`→COMPLETE, `3`→OWED, `null`→
+UNAVAILABLE, anything else→REFUSED), and the watcher's exit follows it
+(COMPLETE→0, UNAVAILABLE→2, OWED/REFUSED→3). A run whose mailbox refused
+and delivered nothing writes no ledger.
+
+Measured with the real CLI against fake bins that reproduce the published
+binary's exact behavior (`tools/measure-mailbox-verdict.mjs`, artifacts
+committed at `research/mailbox-verdict-{baseline,fixed}-2026-11-11.json`):
+
+| Face | Baseline (729d048) | Fixed |
+|---|---|---|
+| X1: mailbox refuses (exit 1, no journal) | VIOLATED (exit 0, COMPLETE) | CLOSED (exit 3, REFUSED, refusal relayed, no ledger minted) |
+| X2: mailbox binary missing | VIOLATED (exit 0, COMPLETE) | CLOSED (exit 2, UNAVAILABLE) |
+| X3: foreign-cursor refusal | VIOLATED (exit 0, COMPLETE) | CLOSED (exit 3, REFUSED, repair text relayed) |
+| X4: retract over a refusing mailbox | VIOLATED (exit 0, no verdict) | CLOSED (exit 3, REFUSED) |
+| X5: refusing mailbox mints `{fills:{}}` | VIOLATED (ledger written behind a dead mailbox) | CLOSED (no file — the run never happened) |
+| GX1 (guard): healthy run | HELD (4 fills, COMPLETE, exit 0) | HELD |
+| GX2 (guard): owed pass | HELD (exit 3, OWED) | HELD |
+
+Pin: `test/mailbox-verdict.test.mjs` — X1–X5 RED on the pre-fix tree
+(729d048: 5 fail / 2 guards green), 7/7 green after. Mutation ladder
+`tools/mutation-ladder-mailbox-verdict.sh`: 6/6 caught (verdict mapping
+both ways, exit mapping both ways, the skip-save gate, the owed guard's
+opposite), tree restored byte-identical.
+
+Honest limits: the fake bins quote the published binary's measured words,
+but the CI faces do not execute reeflog itself; reeflog's own exit-code
+table (usage → 64) is carried into REFUSED, not mapped specially; a mailbox
+that dies by SIGNAL (no exit code in the usual range) is REFUSED by the
+same rule — the consumer never invents health.
+
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 56 tests, no network
+node --test 'test/*.test.mjs'          # offline; 63 tests, no network
 bash tools/mutation-ladder-ledger-durability.sh  # 6 mutations, all must be CAUGHT
 bash tools/mutation-ladder-ledger-concurrency.sh # 7 mutations, all must be CAUGHT
 bash tools/mutation-ladder-ledger-auto-repair.sh # 6 mutations, all must be CAUGHT
+bash tools/mutation-ladder-mailbox-verdict.sh    # 6 mutations, all must be CAUGHT
 node tools/measure-ledger-auto-repair.mjs --expect clean   # 0 faces violated
+node tools/measure-mailbox-verdict.mjs --expect clean      # 0 faces violated
 node tools/e2e-whirlpool.mjs           # live mainnet comparison
 node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```

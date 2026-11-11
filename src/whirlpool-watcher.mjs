@@ -528,6 +528,16 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
     try { row = JSON.parse(line); } catch { continue; }
     rows.push(row);
   }
+  // PULS P — X5: a mailbox that REFUSED (exit 1: no journal, foreign
+  // cursor, corrupt db) or never spawned (null) delivered nothing. Saving
+  // here would mint `{fills:{}}` first-run state out of a run that never
+  // happened — the file IS something that happened, and PULS M's guarantee
+  // was "the run simply never happened". No rows + no explicit 0/3 verdict
+  // => skip the save entirely; the refusal rides out through the verdict.
+  const mailboxRefused = !(t.code === 0 || t.code === 3);
+  if (mailboxRefused && rows.length === 0) {
+    return { exit: t.code, stderr: t.err, rows: 0, legs: 0, dupes: 0, invalid: 0, mergeRepaired: false, mergeNote: null, ledger };
+  }
   // Everything past this point means the mailbox has delivered: a save
   // refusal now either self-repairs (a freshness clash: the durable disk
   // copy and this view are mergeable — PULS O) or parks the rows in a

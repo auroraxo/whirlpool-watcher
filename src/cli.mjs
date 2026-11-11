@@ -14,9 +14,14 @@
 //
 // Exit codes, same discipline as reeflog itself:
 //   0 = the mailbox is complete for what this consumer needed
-//   3 = something is owed or refused (pending payload, unverifiable event,
-//       blocked retraction) — silence is not health
 //   2 = the consumer could not run at all (missing binary, bad arguments)
+//   3 = something is owed or refused (pending payload, unverifiable event,
+//       blocked retraction, a mailbox that refused) — silence is not health
+// PULS P: `verdict` is the MAILBOX's verdict, carried, never stamped here.
+//   COMPLETE (mailbox exit 0) | OWED (exit 3) | REFUSED (any other exit,
+//   e.g. reeflog's named refusals exit 1) | UNAVAILABLE (no exit at all:
+//   the mailbox binary could not be spawned — a missing mailbox is exit 2,
+//   the consumer's own documented "could not run at all" class).
 import path from 'node:path';
 import fs from 'node:fs';
 import {
@@ -37,6 +42,28 @@ function report(obj) {
   console.log(JSON.stringify(obj, (_k, v) => (typeof v === 'bigint' ? v.toString() : v), 2));
 }
 
+// PULS P — the verdict is the MAILBOX's, carried, never stamped here.
+// reeflog's own exit codes: 0 = owes nothing for this pass, 1 = a named
+// refusal (die()), 3 = payloads owed, 64 = usage, null = never spawned.
+// Anything that is not an explicit 0 or 3 is NOT health: a watcher that
+// reports COMPLETE over a dead mailbox measures nothing and says it did.
+function verdictOf(mailboxExit) {
+  if (mailboxExit === null || mailboxExit === undefined) return 'UNAVAILABLE';
+  if (mailboxExit === 0) return 'COMPLETE';
+  if (mailboxExit === 3) return 'OWED';
+  return 'REFUSED';
+}
+
+// Consumer exit: the mailbox verdict rides through the CLI's documented
+// exit-code contract — 2 only when the mailbox could not run at all
+// (missing binary), 3 for anything owed OR refused, 0 for genuine
+// completeness.
+function exitFor(verdict) {
+  if (verdict === 'COMPLETE') return 0;
+  if (verdict === 'UNAVAILABLE') return 2;
+  return 3;
+}
+
 if (mode === 'tail') {
   const db = arg('--db');
   const cursor = arg('--cursor', path.join('/tmp', 'whirlpool-cursor.txt'));
@@ -54,8 +81,11 @@ if (mode === 'tail') {
   }
   // reeflog's own exit code carries the mailbox's verdict: 3 = the journal
   // still owes payloads (pending/unavailable). A consumer that ignores it
-  // would report "no fills" as if that were a fact about the chain.
-  const owed = r.exit === 3;
+  // would report "no fills" as if that were a fact about the chain. PULS P
+  // closes the mirror face: exit 1 (a NAMED REFUSAL inside the mailbox —
+  // no journal, foreign cursor) and a mailbox that never spawned (null)
+  // were both reported COMPLETE with exit 0.
+  const verdict = verdictOf(r.exit);
   report({
     mode: 'tail',
     rows: r.rows,
@@ -70,13 +100,16 @@ if (mode === 'tail') {
     // ends in exit 3 with the rows parked, never here.
     merge_repair: r.mergeRepaired ? 'applied' : null,
     mailbox_exit: r.exit,
-    verdict: owed ? 'OWED' : 'COMPLETE',
+    verdict,
   });
   if (r.stderr) console.error(r.stderr.trim());
   // PULS O: a self-repaired clash is not an error, but it is not silence
   // either — the operator must be able to see that two instances collided.
   if (r.mergeNote) console.error(`whirlpool-watcher: merge repair applied after: ${r.mergeNote.replace(/\s+/g, ' ')}`);
-  process.exit(owed ? 3 : 0);
+  // PULS P: UNAVAILABLE is the documented exit 2 ("the consumer could not
+  // run at all"); REFUSED and OWED both ride exit 3 ("something is owed or
+  // refused — silence is not health").
+  process.exit(exitFor(verdict));
 }
 
 if (mode === 'retract') {
@@ -91,20 +124,28 @@ if (mode === 'retract') {
     if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
     throw err;
   }
-  const undoable = r.retractions.filter((x) => x.undoable_fills.length);
+  const retractions = r.retractions.filter((x) => x.undoable_fills.length);
+  // PULS P: the retraction pass carried the mailbox exit code in a field
+  // but decided health only by "did a retraction undo something" — a
+  // mailbox that died (exit 1) or never ran (null) answered exit 0 with an
+  // empty array read as health. The same verdict rule as tail mode.
+  const verdict = verdictOf(r.exit);
   report({
     mode: 'retract',
     retractions: r.retractions.length,
-    undoable: undoable.length,
-    undone_fills: undoable.reduce((n, x) => n + x.undoable_fills.length, 0),
+    undoable: retractions.length,
+    undone_fills: retractions.reduce((n, x) => n + x.undoable_fills.length, 0),
     open_fills: Object.keys(loadLedger(ledgerPath).fills).length,
     merge_repair: r.mergeRepaired ? 'applied' : null,
     mailbox_exit: r.exit,
+    verdict,
   });
   if (r.stderr) console.error(r.stderr.trim());
   if (r.mergeNote) console.error(`whirlpool-watcher: merge repair applied after: ${r.mergeNote.replace(/\s+/g, ' ')}`);
-  // A retraction that this consumer cannot act on is not health either.
-  process.exit(r.exit === 3 ? 3 : 0);
+  // A retraction that this consumer cannot act on is not health either —
+  // and a mailbox that refused is not a retraction pass at all. verdict
+  // alone decides: UNAVAILABLE -> 2, COMPLETE -> 0, OWED/REFUSED -> 3.
+  process.exit(exitFor(verdict));
 }
 
 // Rescue mode: absorb rows that were PARKED by a ledger refusal. The

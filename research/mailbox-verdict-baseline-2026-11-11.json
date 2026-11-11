@@ -1,0 +1,92 @@
+{
+  "measured_at": "2026-11-11T01:52:21.406Z",
+  "what": "the consumer must carry the mailbox verdict: a refused or unreachable mailbox is never COMPLETE",
+  "seat": {
+    "kind": "watcher tree (the defect lives entirely in this repo)",
+    "watcher_commit": "729d048",
+    "label": "baseline"
+  },
+  "faces": [
+    {
+      "face": "X1_mailbox_refused_exit1",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "mailbox_exit": 1,
+      "rows": 0,
+      "stderr": "reeflog: error: no journal at /tmp/absent.db — run `reeflog init --db /tmp/absent.db --program <pubkey>` first",
+      "violated": true,
+      "detail": "exit 0 != 3; verdict COMPLETE != REFUSED; a ledger was minted by a run that never happened"
+    },
+    {
+      "face": "X2_mailbox_never_spawned",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "mailbox_exit": null,
+      "rows": 0,
+      "stderr": "Error: spawn <tmpdir>/definitely-not-there ENOENT",
+      "violated": true,
+      "detail": "exit 0 != 2; verdict COMPLETE != UNAVAILABLE; a ledger was minted by a run that never happened"
+    },
+    {
+      "face": "X3_foreign_cursor_refusal",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "mailbox_exit": 1,
+      "rows": 0,
+      "stderr": "reeflog: error: cursor /tmp/c3.txt does not belong here — it names journal NOT-THE-REAL-JOURNAL-ID and this journal is 2697dcb76e4c6e27 — refusing to read a position from another channel or journal",
+      "violated": true,
+      "detail": "exit 0 != 3; verdict COMPLETE != REFUSED; a ledger was minted by a run that never happened"
+    },
+    {
+      "face": "X4_retract_over_refusal",
+      "exit": 0,
+      "mailbox_exit": 1,
+      "stderr": "reeflog: error: no journal at /tmp/absent.db — run `reeflog init --db /tmp/absent.db --program <pubkey>` first",
+      "violated": true,
+      "detail": "exit 0 != 3; verdict undefined != REFUSED"
+    },
+    {
+      "face": "X5_no_state_from_a_run_that_never_happened",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "mailbox_exit": 1,
+      "rows": 0,
+      "stderr": "reeflog: error: no journal at /tmp/absent.db",
+      "violated": true,
+      "detail": "exit 0 != 3; verdict COMPLETE != REFUSED; a ledger was minted by a run that never happened"
+    },
+    {
+      "face": "GX1_healthy_guard",
+      "exit": 0,
+      "verdict": "COMPLETE",
+      "mailbox_exit": 0,
+      "rows": 4,
+      "stderr": "",
+      "violated": false,
+      "detail": "exit=0 verdict=COMPLETE mailbox_exit=0"
+    },
+    {
+      "face": "GX2_owed_guard",
+      "exit": 3,
+      "verdict": "OWED",
+      "mailbox_exit": 3,
+      "rows": 2,
+      "stderr": "reeflog: 2 row(s) carry pending payloads",
+      "violated": false,
+      "detail": "exit=3 verdict=OWED mailbox_exit=3"
+    }
+  ],
+  "summary": {
+    "total": 7,
+    "violated_count": 5,
+    "violated": [
+      "X1_mailbox_refused_exit1",
+      "X2_mailbox_never_spawned",
+      "X3_foreign_cursor_refusal",
+      "X4_retract_over_refusal",
+      "X5_no_state_from_a_run_that_never_happened"
+    ],
+    "expectation": "pre-fix tree: at least one face must violate",
+    "measurement_consistent": true
+  }
+}
