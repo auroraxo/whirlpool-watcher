@@ -1,0 +1,57 @@
+{
+  "measured_at": "2026-11-11T03:04:43.253Z",
+  "what": "a retraction ACKed on the webhook must be applied to the ledger, and a rescue replay must never resurrect an undone fill",
+  "seat": {
+    "kind": "watcher tree + REAL reeflog binary (webhook push over a local receiver)",
+    "watcher_commit": "bf263e4",
+    "reeflog_binary": "/home/aurora/github_repos/reeflog/target/release/reeflog",
+    "reeflog_sha": "a50facf1b906c357eab4e12ee7ad3ed4edf25841e462f065eb1735084671a6c2",
+    "label": "fixed"
+  },
+  "faces": [
+    {
+      "face": "Q1_webhook_reorg_reaches_ledger",
+      "violated": false,
+      "detail": "{\"push_exit\":0,\"push_stdout\":\"{\\n  \\\"blocked_targets\\\": 0,\\n  \\\"dead_letters_pending\\\": 0,\\n  \\\"orphaned_dead_letters\\\": 0,\\n  \\\"targets\\\": [\\n    {\\n      \\\"blocked\\\": false,\\n      \\\"blocked_reorg_id\\\": null,\\n      \\\"blocked_seq\\\": null,\\n      \\\"dead_lettered\\\": 0,\\n      \\\"dead_letters_pending\\\": 0,\\n      \\\"delivered\\\": 1,\\n      \\\"error\\\": null,\\n      \\\"failed\\\": 0,\\n      \\\"next_reorg_id\\\": 1,\\n      \\\"next_seq\\\": 1,\\n      \\\"reorg_delivered\\\": 1,\\n      \\\"target\\\":\",\"push_stderr\":\"\",\"delivered\":true,\"reorg_delivered\":true,\"open_fills_after_push\":0,\"retractions_after_push\":1,\"meta_retractions_seen\":1}",
+      "push_exit": 0,
+      "push_stdout": "{\n  \"blocked_targets\": 0,\n  \"dead_letters_pending\": 0,\n  \"orphaned_dead_letters\": 0,\n  \"targets\": [\n    {\n      \"blocked\": false,\n      \"blocked_reorg_id\": null,\n      \"blocked_seq\": null,\n      \"dead_lettered\": 0,\n      \"dead_letters_pending\": 0,\n      \"delivered\": 1,\n      \"error\": null,\n      \"failed\": 0,\n      \"next_reorg_id\": 1,\n      \"next_seq\": 1,\n      \"reorg_delivered\": 1,\n      \"target\":",
+      "push_stderr": "",
+      "delivered": true,
+      "reorg_delivered": true,
+      "open_fills_after_push": 0,
+      "retractions_after_push": 1,
+      "meta_retractions_seen": 1
+    },
+    {
+      "face": "Q2_rescue_no_resurrection",
+      "violated": false,
+      "detail": "open_fills=0 retractions=1 report={\"mode\":\"rescue\",\"parked_rows\":1,\"fills\":1,\"duplicates_ignored\":0,\"retracted_replays_ignored\":1,\"open_fills\":0,\"verdict\":\"COMPLETE\"}",
+      "rescue_exit": 0,
+      "open_fills": 0,
+      "retractions": 1
+    },
+    {
+      "face": "G1_event_delivery_still_records_the_fill",
+      "violated": false,
+      "detail": "status=200 fills=1"
+    },
+    {
+      "face": "G2_unknown_signature_stays_a_report",
+      "violated": false,
+      "detail": "scope held"
+    },
+    {
+      "face": "G3_rescue_still_records_a_new_row",
+      "violated": false,
+      "detail": "status=0 fills=1"
+    }
+  ],
+  "summary": {
+    "total": 5,
+    "violated_count": 0,
+    "violated_defect_faces": [],
+    "violated_guards": [],
+    "expectation": "fixed tree: no face may violate",
+    "measurement_consistent": true
+  }
+}
