@@ -21,7 +21,10 @@
 //  - `webhook` mode: runs a local HTTP receiver, verifies the
 //                   `X-Reeflog-Signature` HMAC on every delivery byte-for-
 //                   byte with node:crypto, dedups on the stable delivery id,
-//                   and answers 2xx only after the fill is durably recorded.
+//                   answers 2xx only after the fill is durably recorded —
+//                   and runs the retraction join on `type: "reorg"`
+//                   deliveries (PULS Q: the ACK of a reorg means the fill
+//                   was undone, not merely that the event was counted).
 //  - `retract` mode: joins the `reeflog reorg tail` channel against the fill
 //                   ledger — only fills THIS consumer read are marked undone;
 //                   unknown signatures are reported, never turned into an
@@ -471,6 +474,14 @@ export function rowToFills(row) {
 export function absorbRow(ledger, row) {
   const { fills, invalid, failed, zero_amount } = rowToFills(row);
   let dupes = 0;
+  // A row whose fill is ALREADY UNDONE (sitting in ledger.retractions) is a
+  // redelivery of a consumed delivery, not a new fill. The dedup check used
+  // to look at ledger.fills ONLY, so the rescue replay of an already-undone
+  // row resurrected the fill beside its own retraction record (PULS Q2,
+  // measured 2026-11-11: after a retract pass, rescue answered open_fills: 1
+  // with exit 0 — open and undone both true).
+  const retractedKeys = new Set(Object.keys(ledger.retractions || {}));
+  let retracted_replays_ignored = 0;
   // A reverted transaction leaves no fill behind. It is recorded as an
   // event that happened, so the ledger can explain why a trade it saw in the
   // logs is not a fill.
@@ -491,6 +502,14 @@ export function absorbRow(ledger, row) {
       // Dedup key: same signature, same pool, same decoded amounts = the same
       // leg (a tx may contain several Traded events from different pools).
       const dedupKey = `${f.signature}:${f.pool}:${f.input}:${f.output}:${f.lp_fee}`;
+      if (retractedKeys.has(dedupKey)) {
+        // The fill this key names was already undone by the retraction join;
+        // the ledger must never claim it open again. A retraction is a
+        // VERDICT about this delivery, not a payload at-least-once will
+        // retry — redelivering it cannot change the verdict.
+        retracted_replays_ignored++;
+        continue;
+      }
       if (ledger.fills[dedupKey]) { dupes++; continue; }
       ledger.fills[dedupKey] = { ...f, recorded_at: Date.now() };
     }
@@ -499,7 +518,8 @@ export function absorbRow(ledger, row) {
     ledger.meta.invalid_events = (ledger.meta.invalid_events || []);
     ledger.meta.invalid_events.push({ seq: row.seq, signature: row.signature, invalid });
   }
-  return { fills: failed ? 0 : fills.length, dupes, invalid: invalid.length, failed, zero: zero_amount.length };
+  return { fills: failed ? 0 : fills.length, dupes, invalid: invalid.length, failed, zero: zero_amount.length,
+    retracted_replays_ignored };
 }
 
 // --- tail mode -------------------------------------------------------------
@@ -693,20 +713,44 @@ export async function runWebhookReceiver({ port, secret, ledgerPath, log = () =>
           res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
           return;
         }
-        log({ delivered: true, seq: payload.seq, fills: r.fills, dupes: r.dupes });
+        // One log line per delivery — the pre-fix branch logged twice
+        // (measured 2026-11-11: the same `{delivered,seq,fills,dupe}` line
+        // printed twice for one ACK, the second carrying merge_repair),
+        // which double-counts any consumer reading the log as a delivery
+        // tally.
         log({ delivered: true, seq: payload.seq, fills: r.fills, dupes: r.dupes,
           ...(repaired ? { merge_repair: 'applied' } : {}) });
         res.writeHead(200).end('ok');
       } else if (payload.type === 'reorg') {
+        // PULS Q: the retraction is a VERDICT about an already-delivered
+        // event, and this webhook ACK is the only copy this consumer will
+        // ever see: `retract` mode joins a DIFFERENT channel (`reeflog reorg
+        // tail`, its own cursor) that a webhook deployment never walks.
+        // Bumping a counter and answering 200 (the pre-fix branch) let
+        // reeflog mark the retraction delivered while the fill stayed open
+        // forever — the ACK meant the undo, not a receipt. So run the SAME
+        // scoped join retract mode runs: only fills this ledger holds are
+        // undone; an unknown signature is reported, never turned into an
+        // unfill of somebody else's fill. Redelivery of the same reorg is a
+        // no-op by construction (the fill is already out of `fills`).
+        const retracted = applyRetractions(ledger, [payload]);
+        const undone = retracted.reduce((n, x) => n + x.undoable_fills.length, 0);
+        ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
+        if (undone === 0 && retracted[0] && retracted[0].undoable_fills.length === 0) {
+          // An unknown-signature retraction is health for nobody: keep the
+          // report visible, not only in the log line.
+          ledger.meta.retractions_unknown = (ledger.meta.retractions_unknown || []);
+          ledger.meta.retractions_unknown.push({
+            reorg_id: payload.reorg_id ?? null, signature: payload.signature });
+        }
         try {
-          ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
           saveLedgerWithRepair(ledgerPath, ledger);
         } catch (err) {
           log({ refused: true, why: err.message });
           res.writeHead(503).end(`ledger unwritable: ${String(err.message).replace(/\s+/g, ' ')}`);
           return;
         }
-        log({ retraction: true, signature: payload.signature });
+        log({ retraction: true, signature: payload.signature, undone });
         res.writeHead(200).end('ok');
       } else {
         res.writeHead(400).end('unknown type');

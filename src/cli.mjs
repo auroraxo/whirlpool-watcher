@@ -171,10 +171,11 @@ if (mode === 'rescue') {
     if (err && err.isRefusal) { console.error(err.message); process.exit(3); }
     throw err;
   }
-  let legs = 0, dupes = 0;
+  let legs = 0, dupes = 0, retractedReplays = 0;
   for (const row of rows) {
     const r = absorbRow(ledger, row);
     legs += r.fills; dupes += r.dupes;
+    retractedReplays += r.retracted_replays_ignored || 0;
   }
   try {
     saveLedger(ledgerPath, ledger);
@@ -187,6 +188,10 @@ if (mode === 'rescue') {
     parked_rows: rows.length,
     fills: legs,
     duplicates_ignored: dupes,
+    // PULS Q: rows whose fill this ledger already UNDONE (a retract pass or
+    // a webhook reorg ran the join) are refused resurrection — named, never
+    // silently skipped. open_fills and retractions cannot both be true.
+    retracted_replays_ignored: retractedReplays,
     open_fills: Object.keys(ledger.fills).length,
     verdict: 'COMPLETE',
   });
