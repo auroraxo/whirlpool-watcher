@@ -114,7 +114,8 @@ node - <<'EOF'
 import fs from 'node:fs';
 const f = 'src/whirlpool-watcher.mjs';
 let s = fs.readFileSync(f, 'utf8');
-s = s.replace('    fills: { ...mine.fills, ...diskLedger.fills },', '    fills: { ...diskLedger.fills, ...mine.fills },');
+s = s.replace('  const fills = { ...mine.fills, ...diskLedger.fills };',
+              '  const fills = { ...diskLedger.fills, ...mine.fills }; // mutated: mine wins');
 fs.writeFileSync(f, s);
 EOF
 caught M5 ledger-concurrency.test.mjs
@@ -124,7 +125,10 @@ node - <<'EOF'
 import fs from 'node:fs';
 const f = 'src/whirlpool-watcher.mjs';
 let s = fs.readFileSync(f, 'utf8');
-s = s.replace('  err.isRefusal = true;\n  return err;', '  return err;');
+// Anchor: PULS O added `err.freshness` between the flag and the return; the
+// old two-line pattern matched nothing from PULS O on.
+s = s.replace('  err.isRefusal = true;\n  // PULS O:',
+              '  // mutated: isRefusal flag lost\n  // PULS O:');
 fs.writeFileSync(f, s);
 EOF
 caught M6 ledger-concurrency.test.mjs

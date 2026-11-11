@@ -287,16 +287,83 @@ table (usage → 64) is carried into REFUSED, not mapped specially; a mailbox
 that dies by SIGNAL (no exit code in the usual range) is REFUSED by the
 same rule — the consumer never invents health.
 
+## The retraction reaches the ledger it was ACKed for (PULS Q)
+
+Two faces, hand-measured 2026-11-11 on the pre-fix tree (addbb50), the
+second one with the REAL reeflog binary pushing through a live receiver:
+
+- **The webhook reorg branch recorded the event, not the undo.** The
+  retraction join (`applyRetractions`) was called ONLY by `retract` mode,
+  which walks the `reeflog reorg tail` CLI cursor. The webhook receiver
+  bumped `meta.retractions_seen`, answered 200, and never touched the
+  fill — so a deployment that answers reorgs over HTTP got reeflog's
+  durable delivery receipt (`"reorg_delivered": 1`, cursor advanced, no
+  redelivery ever) while the fill stayed open forever. Measured with the
+  real binary: `webhook push` reported `delivered: 1, reorg_delivered: 1`
+  and the ledger still held the fill open next to `retractions_seen: 1`.
+- **The rescue replay resurrected an undone fill.** `absorbRow` deduped
+  on `(signature, pool, input, output, lp_fee)` against `ledger.fills`
+  ONLY — a key sitting in `ledger.retractions` was invisible, so the
+  parked-row replay of an already-retracted delivery put the fill back
+  INTO `fills` beside its own undo record: open and undone, both true.
+  The rescue file exists precisely because its rows were consumed once
+  already — "already delivered" rows are its whole population.
+
+The fix keeps the rule in one place and gives the retractions their say on
+EVERY path that adds a fill:
+
+- the webhook `type === 'reorg'` branch runs the SAME scoped join
+  `retract` mode runs (only fills this ledger holds are undone; an unknown
+  signature is recorded in `meta.retractions_unknown`, never turned into
+  an unfill of somebody else's fill); the same reorg id replayed is a
+  no-op by construction;
+- `absorbRow` refuses resurrection: a dedup key that already sits in
+  `ledger.retractions` is counted as `retracted_replays_ignored` and
+  reported by `rescue`, never silently skipped;
+- a retraction is a VERDICT about an already-delivered event, not a
+  payload at-least-once will retry — redelivering it cannot change the
+  verdict, so replay safety comes from idempotence, not from hoping the
+  queue stays quiet.
+
+Measured with `tools/measure-webhook-retraction.mjs` against a REAL
+reeflog binary (`webhook push` over a local receiver seeded through the
+journal, artifacts committed at
+`research/webhook-retraction-{baseline,fixed}-2026-11-11.json`):
+
+| Face | Baseline (addbb50) | Fixed |
+|---|---|---|
+| Q1: ACKed webhook reorg reaches the ledger | VIOLATED (fill open after `reorg_delivered: 1`) | CLOSED (fill undone, recorded in `retractions`, scoped) |
+| Q2: rescue replays a retracted delivery | VIOLATED (open=1 AND retractions=1) | CLOSED (`retracted_replays_ignored: 1`, open=0) |
+| G1 (guard): event delivery records the fill | HELD (200, 1 fill) | HELD |
+| G2 (guard): unknown signature stays a report | HELD (no unfill) | HELD |
+| G3 (guard): rescue of a new row still lands | HELD (1 fill, exit 0) | HELD |
+
+Pin: `test/webhook-retraction.test.mjs` — Q1/Q1b/Q1c/Q2 RED on the
+pre-fix tree (4 fail / 3 guards green), 7/7 green after. Mutation ladder
+`tools/mutation-ladder-webhook-retraction.sh`: 6/6 caught (join removed,
+dedup blind to retractions, unscoped undo, unreported skip, dedup dropped,
+undo without record), tree restored byte-identical.
+
+Honest limits: the Q1 face drives the real reeflog binary, but the seeded
+journal rows are written directly to the SQLite tables the daemon owns —
+the delivery pass under test is real, the event content is a fixture; a
+reorg naming a signature whose fill arrived on a DIFFERENT consumer's
+ledger is still only a report; two reorg ids undoing the same fill twice
+still record one retraction entry (the second is a no-op), which is the
+intended dedup-on-key, not a counted event.
+
 ## Falsification
 
 ```bash
-node --test 'test/*.test.mjs'          # offline; 63 tests, no network
+node --test 'test/*.test.mjs'          # offline; 70 tests, no network
 bash tools/mutation-ladder-ledger-durability.sh  # 6 mutations, all must be CAUGHT
 bash tools/mutation-ladder-ledger-concurrency.sh # 7 mutations, all must be CAUGHT
 bash tools/mutation-ladder-ledger-auto-repair.sh # 6 mutations, all must be CAUGHT
 bash tools/mutation-ladder-mailbox-verdict.sh    # 6 mutations, all must be CAUGHT
+bash tools/mutation-ladder-webhook-retraction.sh # 6 mutations, all must be CAUGHT
 node tools/measure-ledger-auto-repair.mjs --expect clean   # 0 faces violated
 node tools/measure-mailbox-verdict.mjs --expect clean      # 0 faces violated
+node tools/measure-webhook-retraction.mjs --expect clean   # 0 faces violated (needs a reeflog binary)
 node tools/e2e-whirlpool.mjs           # live mainnet comparison
 node tools/e2e-whirlpool.mjs --mutate  # must go RED
 ```

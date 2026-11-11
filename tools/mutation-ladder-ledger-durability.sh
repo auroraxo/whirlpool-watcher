@@ -134,16 +134,13 @@ node - <<'EOF'
 import fs from 'node:fs';
 const f = 'src/whirlpool-watcher.mjs';
 let s = fs.readFileSync(f, 'utf8');
-s = s.replace(`          log({ refused: true, why: err.message });
-          res.writeHead(503).end(\`ledger unwritable: \${String(err.message).replace(/\\s+/g, ' ')}\`);
-          return;
-        }
-        log({ delivered: true,`,
-`          log({ refused: true, why: err.message });
-          res.writeHead(200).end('ok');
-          return;
-        }
-        log({ delivered: true,`);
+// The EVENT-path save refusal is the FIRST `ledger unwritable` 503 in the
+// file (the reorg-path refusal sits below it). Anchor on the statement
+// head, not on the surrounding lines: the PULS Q log-dedup fix reshaped the
+// delivered log line and the old multi-line anchor matched nothing on a
+// healthy tree.
+s = s.replace('res.writeHead(503).end(`ledger unwritable',
+              "res.writeHead(200).end('ok'); // mutated: ledger unwritable");
 fs.writeFileSync(f, s);
 EOF
 caught M4 ledger-contract.test.mjs
@@ -155,10 +152,9 @@ const f = 'src/whirlpool-watcher.mjs';
 let s = fs.readFileSync(f, 'utf8');
 s = s.replace(
   `      // A missing file is the documented first run, not a corruption.
-      return { fills: {}, retractions: {}, meta: {} };`,
-  `      throw shapeError('does not exist yet', file);`,
-);
-fs.writeFileSync(f, s);
+      existed = false;`,
+  `      throw shapeError('does not exist yet', file); // mutated`,
+);fs.writeFileSync(f, s);
 EOF
 caught M5 ledger-contract.test.mjs
 
