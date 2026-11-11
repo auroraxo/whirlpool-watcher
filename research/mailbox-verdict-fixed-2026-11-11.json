@@ -1,9 +1,9 @@
 {
-  "measured_at": "2026-11-11T01:52:22.317Z",
+  "measured_at": "2026-11-11T01:52:57.061Z",
   "what": "the consumer must carry the mailbox verdict: a refused or unreachable mailbox is never COMPLETE",
   "seat": {
     "kind": "watcher tree (the defect lives entirely in this repo)",
-    "watcher_commit": "729d048",
+    "watcher_commit": "3d66b71",
     "label": "fixed"
   },
   "faces": [
