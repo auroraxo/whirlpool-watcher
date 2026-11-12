@@ -1,0 +1,46 @@
+{
+  "measurement": "delivery-line-voice",
+  "pulse": "PULS X",
+  "date": "2026-11-12",
+  "tree_before": "c176efc (PULS Q tip, 70/70 green)",
+  "defect": "The consumer's line-level reader silently swallowed what it could not read, in all three mouths (tail / retract / rescue) — one level below decode.mjs's own rule: 'a consumer that silently drops invalid claims delivery it did not get'.",
+  "faces_measured": [
+    {
+      "face": "D1 tail: truncated stdout line",
+      "setup": "scripted bin emits 2 valid JSON rows + 1 half-line '{\"seq\":3,\"signature\":\"TRUNC', exit 0 (mailboxes advance the cursor AFTER printing — verified in reeflog src/main.rs run_tail: write_cursor runs after the row loop)",
+      "before": {"rows": 2, "fills": 2, "verdict": "COMPLETE", "exit": 0, "silently_lost": 1},
+      "after": {"exit": 3, "voice": "refusing tail run: 1 unreadable line(s) on delivered tail output ... line 3 does not parse as JSON ... parked verbatim at /tmp/whirlpool-watcher-unreadable-l.json-*.jsonl ... reeflog will NOT redeliver them", "intact_fills_durable": true}
+    },
+    {
+      "face": "D2 tail: identity-less row (parses, no signature)",
+      "setup": "valid JSON row without `signature` field",
+      "before": {"dedup_key": "undefined:3B4L4HnFEL354y5U1aZR9ED8o3R7E3TibinWMfjdGWLu:...", "mints_fill_nothing_can_retract": true, "exit": 0},
+      "after": {"exit": 3, "voice": "carries no `signature` — a fill without identity can never be deduped or retracted", "undefined_keys": 0}
+    },
+    {
+      "face": "D2b tail: row with signature but no numeric seq",
+      "after": {"exit": 3, "voice": "carries no numeric `seq` — the delivery position is unknown"}
+    },
+    {
+      "face": "D3 retract: truncated reorg line",
+      "setup": "1 valid reorg row + 1 half-line, exit 0; reorg cursor also advances after printing (run_reorg_tail)",
+      "before": {"exit": 0, "verdict": "COMPLETE", "silently_lost_undo": 1},
+      "after": {"exit": 3, "intact_retraction_applied": true, "parked_verbatim": true}
+    },
+    {
+      "face": "D3b retract: reorg row with no signature (applyRetractions joins on f.signature === row.signature)",
+      "after": {"exit": 3, "retraction_minted": 0}
+    },
+    {
+      "face": "D4 rescue: corrupt line in the parked file",
+      "setup": "3-line rescue file, 1 corrupt",
+      "before": {"parked_rows_reported": 2, "actual_lines": 3, "exit": 0, "verdict": "COMPLETE", "repair_tool_itself_loses_rows": true},
+      "after": {"exit": 3, "ledger_written": false, "file_byte_identical": true, "voice": "line 2 does not parse as JSON ... the rescue file is UNCHANGED"}
+    }
+  ],
+  "fix": "readDeliveryLines(out, kind) + eventRowDefect/reorgRowDefect in src/whirlpool-watcher.mjs (used by watchTail, watchRetractions); rescue reads every line in src/cli.mjs and refuses BEFORE touching the ledger; unreadable bytes parked byte-verbatim via parkLines (parkRows re-serialises; for a line that never became an object the bytes ARE the copy). Intact rows absorbed+saved BEFORE the refusal — nothing delivered is lost.",
+  "tests": {"file": "test/delivery-line-voice.test.mjs", "before_fix": "4 RED / 3 guard-GREEN (RED proven on c176efc)", "after_fix": "9/9 green", "full_suite": "79/79"},
+  "ladder": "tools/mutation-ladder-delivery-line-voice.sh — 8/8 CAUGHT (M1-M8), RESTORE byte-identical, SUITE green; first run ESCAPED M3/M6 (vacuous guards) which forced the new D2b/D3b pins — the ladder found its own missing fangs",
+  "real_mailbox_safe": "reeflog run_tail/run_reorg_tail print exactly one JSON object per line on stdout (progress on eprintln), always with seq+signature — no header/banner lines exist for a strict reader to reject",
+  "caveat": "webhook payload identity validation NOT covered by this pulse (separate transport, signed body); applyRetractions called directly by webhook path still trusts payload.signature"
+}

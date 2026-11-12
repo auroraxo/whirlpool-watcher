@@ -421,6 +421,84 @@ export function parkRows(rows, ledgerPath) {
   return file;
 }
 
+// PULS X: park the unreadable LINES byte-verbatim. `parkRows` re-serialises
+// objects — for a line that never became an object the bytes ARE the only
+// surviving copy, so a repaired copy of somebody's truncation would mint a
+// new "fact". These bytes go to disk exactly as they arrived.
+export function parkLines(lines, ledgerPath) {
+  const base = path.basename(ledgerPath || 'ledger.json');
+  const file = path.join(os.tmpdir(), `whirlpool-watcher-unreadable-${base}-${Date.now()}.jsonl`);
+  fs.writeFileSync(file, lines.join('\n') + (lines.length ? '\n' : ''));
+  return file;
+}
+
+// PULS X — the delivery-line contract, one level below decode.mjs's
+// "a consumer that silently drops `invalid` claims delivery it did not
+// get". A line on a delivered channel that the consumer cannot read is
+// DEBT: reeflog advances the cursor after printing every row, so a skipped
+// line is lost forever and a row without identity mints a fill nothing can
+// ever name or retract (applyRetractions joins on `signature`). The reader
+// therefore collects defects and the run refuses over them; it never
+// `continue`s past them. `null` means the row is readable and named.
+function eventRowDefect(row) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+    return 'is not a JSON object';
+  }
+  if (typeof row.signature !== 'string' || row.signature === '') {
+    return 'carries no `signature` — a fill without identity can never be deduped or retracted';
+  }
+  if (typeof row.seq !== 'number') {
+    return 'carries no numeric `seq` — the delivery position is unknown';
+  }
+  return null;
+}
+
+function reorgRowDefect(row) {
+  if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+    return 'is not a JSON object';
+  }
+  if (typeof row.signature !== 'string' || row.signature === '') {
+    return 'carries no `signature` — a retraction that names no transaction cannot undo anything';
+  }
+  return null;
+}
+
+// Split a delivered stdout into lines and read EVERY one. Returns the rows
+// that survived validation and the defects (ordinal, reason, verbatim
+// bytes) for the rest. `kind` decides the row contract: event rows need
+// `signature` + numeric `seq`; retraction rows need `signature`.
+export function readDeliveryLines(stdout, kind) {
+  const lines = String(stdout).split('\n').filter(Boolean);
+  const rows = [];
+  const defects = [];
+  lines.forEach((line, i) => {
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (err) {
+      defects.push({ ordinal: i + 1, why: `does not parse as JSON (${String(err && err.message).split('\n')[0]})`, line });
+      return;
+    }
+    const bad = kind === 'reorg' ? reorgRowDefect(row) : eventRowDefect(row);
+    if (bad) defects.push({ ordinal: i + 1, why: bad, line });
+    else rows.push(row);
+  });
+  return { rows, defects };
+}
+
+// The refusal for unreadable DELIVERED lines: names the channel, each
+// defect with its ordinal and bytes, the parked copy, and the truth that
+// the mailbox will not redeliver. The message is the API — the run keeps
+// what arrived intact (absorbed and saved) before refusing.
+export function lineRefusal(channel, defects, parked) {
+  const detail = defects
+    .map((x) => `  line ${x.ordinal} ${x.why}: ${x.line.slice(0, 120)}`)
+    .join('\n');
+  return `refusing ${channel} run: ${defects.length} unreadable line(s) on delivered ${channel} output — a line the consumer cannot read is debt, not noise:\n${detail}\n` +
+    `the unreadable lines are parked verbatim at ${parked} — the mailbox cursor already advanced past every line the mailbox printed, so reeflog will NOT redeliver them\n` +
+    `intact rows from the same batch were absorbed and saved; repair the parked bytes by hand if the lost rows matter`;
+}
+
 // The refusal text for rows the mailbox already delivered (cursor advanced):
 // names the defect, the parked file, and the repair command.
 export function consumedRefusal(err, parked, rows, phase) {
@@ -541,13 +619,16 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
     throw err;
   }
   const t = await cli([bin, 'tail', '--db', db, '--cursor', cursor, '--limit', String(limit)]);
-  const lines = t.out.split('\n').filter(Boolean);
-  const rows = [];
-  for (const line of lines) {
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    rows.push(row);
-  }
+  // PULS X — read EVERY delivered line. The pre-fix reader did
+  // `try { row = JSON.parse(line); } catch { continue; }`: a mailbox that
+  // exits 0 (its cursor already advanced past every row it printed) with
+  // one truncated line lost that row FOREVER while the report said
+  // COMPLETE and the process exited 0. Hand-measured on c176efc: a
+  // half-line on stdout gave `rows: 2, verdict COMPLETE, exit 0` with the
+  // third row silently gone. A row that PARSES but carries no `signature`
+  // is worse: the dedup key becomes the literal `undefined:...` and the
+  // ledger mints a fill that no reorg can ever name.
+  const { rows, defects } = readDeliveryLines(t.out, 'event');
   // PULS P — X5: a mailbox that REFUSED (exit 1: no journal, foreign
   // cursor, corrupt db) or never spawned (null) delivered nothing. Saving
   // here would mint `{fills:{}}` first-run state out of a run that never
@@ -582,6 +663,13 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
       die(consumedRefusal(err, parked, rows.length, 'tail save'));
     }
     throw err;
+  }
+  // PULS X — the refusal comes AFTER the save: the rows that DID arrive are
+  // durable (nothing delivered is lost), and the unreadable lines are
+  // parked verbatim (their bytes are the only copy that will survive).
+  if (defects.length) {
+    const parked = parkLines(defects.map((x) => x.line), ledgerPath);
+    die(lineRefusal('tail', defects, parked));
   }
   return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, mergeRepaired, mergeNote, ledger };
 }
@@ -621,13 +709,11 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
     throw err;
   }
   const t = await cli([bin, 'reorg', 'tail', '--db', db, '--cursor', cursor, '--limit', String(limit)]);
-  const lines = t.out.split('\n').filter(Boolean);
-  const rows = [];
-  for (const line of lines) {
-    let row;
-    try { row = JSON.parse(line); } catch { continue; }
-    rows.push(row);
-  }
+  // PULS X — same contract on the reorg channel. A retraction is a VERDICT
+  // about an already-delivered fill, and reeflog advances the reorg cursor
+  // past every line it printed: swallowing an unreadable line loses the
+  // undo forever while the fill stays open beside a COMPLETE report.
+  const { rows, defects } = readDeliveryLines(t.out, 'reorg');
   const retractions = applyRetractions(ledger, rows);
   let mergeRepaired = false;
   let mergeNote = null;
@@ -643,6 +729,12 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
       }
       throw err;
     }
+  }
+  // PULS X — the readable retractions are already applied and durable; the
+  // unreadable ones are debt and ride out as a refusal (exit 3).
+  if (defects.length) {
+    const parked = parkLines(defects.map((x) => x.line), ledgerPath);
+    die(lineRefusal('reorg', defects, parked));
   }
   return { exit: t.code, stderr: t.err, retractions, mergeRepaired, mergeNote };
 }

@@ -161,9 +161,43 @@ if (mode === 'rescue') {
     console.error(`rescue: cannot read ${file}: ${e.code || e}`);
     process.exit(2);
   }
-  const rows = raw.split('\n').filter(Boolean).map((l) => {
-    try { return JSON.parse(l); } catch { return null; }
-  }).filter(Boolean);
+  // PULS X — the rescue file is the durable copy of rows the mailbox will
+  // NOT redeliver. The pre-fix reader did `map(parse → null).filter(Boolean)`:
+  // a 3-line file with one corrupt line reported `parked_rows: 2`, exit 0,
+  // verdict COMPLETE — the named REPAIR tool itself lost rows and
+  // under-reported its own input (hand-measured on c176efc). Reading the
+  // file is the whole job; an unreadable line here is debt. Refuse BEFORE
+  // the ledger is touched: no ledger is minted, no fill is absorbed, and
+  // the file is byte-identical — the operator repairs the named line and
+  // re-runs. Intact lines are never discarded silently: on a healthy file
+  // `parked_rows` equals the non-empty lines the file HOLDS.
+  const rawLines = raw.split('\n').filter(Boolean);
+  const rows = [];
+  const unreadable = [];
+  rawLines.forEach((line, i) => {
+    let row;
+    try {
+      row = JSON.parse(line);
+    } catch (err) {
+      unreadable.push({ ordinal: i + 1, why: `does not parse as JSON (${String(err && err.message).split('\n')[0]})`, line });
+      return;
+    }
+    if (row === null || typeof row !== 'object' || Array.isArray(row)) {
+      unreadable.push({ ordinal: i + 1, why: 'is not a JSON object', line });
+      return;
+    }
+    rows.push(row);
+  });
+  if (unreadable.length) {
+    const detail = unreadable
+      .map((x) => `  line ${x.ordinal} ${x.why}: ${x.line.slice(0, 120)}`)
+      .join('\n');
+    console.error(
+      `refusing rescue run: ${unreadable.length} unreadable line(s) in ${file} — a parked line the consumer cannot read is debt, not noise:\n${detail}\n` +
+      `the rescue file is UNCHANGED (byte-identical, no ledger was written): repair the named line(s) in place, then run rescue again`,
+    );
+    process.exit(3);
+  }
   let ledger;
   try {
     ledger = loadLedger(ledgerPath);
