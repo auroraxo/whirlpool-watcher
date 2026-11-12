@@ -413,6 +413,15 @@ real, not their direction; that limit is pinned by the `LIMIT` test in
   put TLS and auth in front of it before exposing it beyond localhost.
 - Retractions undo what **this** consumer read; if you share a ledger between
   consumers, dedup happens on (signature, pool, amounts), not on consumer identity.
+- The two mailbox channels CROSS (PULS Y): reeflog delivers events by `seq` and
+  retractions by `reorg_id` — independent orders, independent cursors — so a
+  retraction can arrive BEFORE the event it undoes (blocked event queue, a
+  `--limit` cut, separate crons). Such a verdict is stored as
+  `meta.retractions_pending` and applied when the event lands: the fill goes
+  straight to `retractions`, never open, named in the report as
+  `retraction_first_ignored`. What the ledger cannot do: undo a fill from a
+  verdict that arrived for a signature this consumer NEVER reads — it stays
+  pending forever (harmless bookkeeping, not a wrong open).
 - Concurrency is detected, not arbitrated: a freshness refusal means two
   instances RACED and the loser stops without overwriting. The loser now
   self-repairs by merging (PULS O), which closes the lost-update *outcome*;

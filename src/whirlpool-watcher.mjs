@@ -249,6 +249,22 @@ function mergeMeta(diskMeta, myMeta) {
     }
     merged[key] = [...seen.values()];
   }
+  // PULS Y: pending verdicts are neither side's property alone — they are
+  // the durable memory of the chain's verdicts for events NEITHER pass has
+  // necessarily read. Disk-first spread would drop this side's pending
+  // verdicts (and vice versa); union by signature, merging the reorg-id
+  // trail, keeps every verdict live until the delivery that consumes it.
+  const dp = Array.isArray(diskMeta?.retractions_pending) ? diskMeta.retractions_pending : [];
+  const mp = Array.isArray(myMeta?.retractions_pending) ? myMeta.retractions_pending : [];
+  if (dp.length || mp.length) {
+    const bySig = new Map();
+    for (const e of [...dp, ...mp]) {
+      const cur = bySig.get(e.signature);
+      if (!cur) bySig.set(e.signature, { ...e, reorg_ids: [...(e.reorg_ids || [])] });
+      else for (const id of e.reorg_ids || []) if (!cur.reorg_ids.includes(id)) cur.reorg_ids.push(id);
+    }
+    merged.retractions_pending = [...bySig.values()];
+  }
   return merged;
 }
 
@@ -549,9 +565,42 @@ export function rowToFills(row) {
   return { fills, invalid, failed, zero_amount };
 }
 
+// PULS Y — the ledger's memory of a retraction whose event had not been
+// read yet. Keyed by signature, because the join undoes by signature; each
+// entry carries every reorg id that named it, so the receipt trail stays
+// complete even when the same reorg is redelivered (200 lost mid-response).
+// A list under meta (not a top-level object) keeps the ledger shape the
+// merge already unions correctly (META_REPORT_LISTS).
+function pendingSignatureVerdict(ledger, signature) {
+  return (ledger.meta.retractions_pending || []).some((p) => p.signature === signature);
+}
+
+// Remove and return the pending verdicts for one signature, reshaped into
+// reorg rows so the EXISTING scoped join (applyRetractions) performs the
+// undo: only fills this consumer read are touched, the record carries the
+// reorg evidence, and a replay stays a no-op by construction.
+function consumePendingVerdicts(ledger, signature) {
+  const pending = ledger.meta.retractions_pending || [];
+  const taken = pending.filter((p) => p.signature === signature);
+  ledger.meta.retractions_pending = pending.filter((p) => p.signature !== signature);
+  if (ledger.meta.retractions_pending.length === 0) delete ledger.meta.retractions_pending;
+  return taken.map((p) => ({
+    reorg_id: p.reorg_ids[0],
+    signature: p.signature,
+    slot: p.slot,
+    detected_at: p.detected_at ?? null,
+    status_source: p.status_source ?? null,
+    tx_source: p.tx_source ?? null,
+    detail: p.detail ?? null,
+  }));
+}
+
 export function absorbRow(ledger, row) {
   const { fills, invalid, failed, zero_amount } = rowToFills(row);
   let dupes = 0;
+  // PULS Y — count the retractions-first refusal per EVENT (the row is the
+  // delivery; the per-fill loop below runs the join once per signature).
+  let retraction_first_events = 0;
   // A row whose fill is ALREADY UNDONE (sitting in ledger.retractions) is a
   // redelivery of a consumed delivery, not a new fill. The dedup check used
   // to look at ledger.fills ONLY, so the rescue replay of an already-undone
@@ -560,6 +609,7 @@ export function absorbRow(ledger, row) {
   // with exit 0 — open and undone both true).
   const retractedKeys = new Set(Object.keys(ledger.retractions || {}));
   let retracted_replays_ignored = 0;
+  let retraction_first = 0;
   // A reverted transaction leaves no fill behind. It is recorded as an
   // event that happened, so the ledger can explain why a trade it saw in the
   // logs is not a fill.
@@ -576,6 +626,7 @@ export function absorbRow(ledger, row) {
     ledger.meta.zero_amount_trades = (ledger.meta.zero_amount_trades || 0) + zero_amount.length;
   }
   if (!failed) {
+    const rowSignatures = new Set();
     for (const f of fills) {
       // Dedup key: same signature, same pool, same decoded amounts = the same
       // leg (a tx may contain several Traded events from different pools).
@@ -590,6 +641,26 @@ export function absorbRow(ledger, row) {
       }
       if (ledger.fills[dedupKey]) { dupes++; continue; }
       ledger.fills[dedupKey] = { ...f, recorded_at: Date.now() };
+      rowSignatures.add(f.signature);
+    }
+    // PULS Y — the verdict that arrived first: a retraction for this
+    // signature was delivered BEFORE this event (the channels cross:
+    // reeflog delivers events by seq and reorgs by reorg_id, two
+    // independent orders), the consumer answered "no such fill" and kept
+    // the verdict in meta.retractions_pending. The reorg cursor/receipt
+    // has moved PAST it — this delivery is the last moment where the
+    // chain's verdict can be applied. Book every leg FIRST (the evidence
+    // of what the logs say), then run the EXISTING scoped join per
+    // signature over the pending verdicts: the join undoes EVERY leg of
+    // that signature — a multi-pool transaction is undone whole, never
+    // half — and each undone fill lands in `retractions` with its undo
+    // attached. (GY3: a held fill with nothing pending still dedups
+    // above; pending-vs-held is a channel-ordering fact, not dedup.)
+    for (const sig of rowSignatures) {
+      if (pendingSignatureVerdict(ledger, sig)) {
+        applyRetractions(ledger, consumePendingVerdicts(ledger, sig));
+        retraction_first_events++;
+      }
     }
   }
   if (invalid.length) {
@@ -597,7 +668,7 @@ export function absorbRow(ledger, row) {
     ledger.meta.invalid_events.push({ seq: row.seq, signature: row.signature, invalid });
   }
   return { fills: failed ? 0 : fills.length, dupes, invalid: invalid.length, failed, zero: zero_amount.length,
-    retracted_replays_ignored };
+    retracted_replays_ignored, retraction_first_ignored: retraction_first_events };
 }
 
 // --- tail mode -------------------------------------------------------------
@@ -644,11 +715,12 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
   // copy and this view are mergeable — PULS O) or parks the rows in a
   // rescue file (storage/corruption failures), because the cursor has
   // already advanced.
-  let rowsN = 0, legs = 0, dupes = 0, invalid = 0;
+  let rowsN = 0, legs = 0, dupes = 0, invalid = 0, retractionFirst = 0;
   for (const row of rows) {
     rowsN++;
     const r = absorbRow(ledger, row);
     legs += r.fills; dupes += r.dupes; invalid += r.invalid;
+    retractionFirst += r.retraction_first_ignored || 0;
   }
   let mergeRepaired = false;
   let mergeNote = null;
@@ -671,7 +743,7 @@ export async function watchTail({ db, cursor, bin = 'reeflog', limit = 5000, led
     const parked = parkLines(defects.map((x) => x.line), ledgerPath);
     die(lineRefusal('tail', defects, parked));
   }
-  return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, mergeRepaired, mergeNote, ledger };
+  return { exit: t.code, stderr: t.err, rows: rowsN, legs, dupes, invalid, retractionFirst, mergeRepaired, mergeNote, ledger };
 }
 
 // --- retraction join -------------------------------------------------------
@@ -697,6 +769,33 @@ export function applyRetractions(ledger, rows) {
   return retractions;
 }
 
+// PULS Y — a retraction row whose fill this ledger does NOT hold. Whether
+// the signature was simply never read (scoped: GY2) or its event has not
+// arrived yet (the channels crossing) is unknowable at retraction time —
+// so the verdict is recorded as pending, and absorbRow applies it at
+// delivery. The record is keyed by the signature; a signature already in
+// `retractions` has its verdict (a redelivered reorg stays a no-op).
+export function recordPendingVerdict(ledger, row) {
+  if (Object.values(ledger.retractions || {}).some((r) => r.signature === row.signature)) return false;
+  const pending = (ledger.meta.retractions_pending = ledger.meta.retractions_pending || []);
+  const existing = pending.find((p) => p.signature === row.signature);
+  const reorgId = row.reorg_id ?? null;
+  if (existing) {
+    if (!existing.reorg_ids.includes(reorgId)) existing.reorg_ids.push(reorgId);
+    return true;
+  }
+  pending.push({
+    signature: row.signature,
+    slot: row.slot ?? null,
+    reorg_ids: [reorgId],
+    detected_at: row.detected_at ?? null,
+    status_source: row.status_source ?? null,
+    tx_source: row.tx_source ?? null,
+    detail: row.detail ?? null,
+  });
+  return true;
+}
+
 export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 1000, ledgerPath }) {
   ensureLedgerWritable(ledgerPath);
   let ledger;
@@ -715,9 +814,22 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
   // undo forever while the fill stays open beside a COMPLETE report.
   const { rows, defects } = readDeliveryLines(t.out, 'reorg');
   const retractions = applyRetractions(ledger, rows);
+  // PULS Y — the reorg cursor moves past every row reeflog printed: a
+  // retraction whose fill this ledger does not hold is the last word from
+  // the mailbox about that signature. Record it as a PENDING VERDICT so
+  // the event — whenever this consumer reads it (another process, a later
+  // cron, the event queue unblocking) — is refused open instead of booked
+  // beside a verdict that will never redeliver.
+  let pending_recorded = 0;
+  for (const row of rows) {
+    const undoable = retractions.find((r) => r.reorg_id === row.reorg_id && r.signature === row.signature);
+    if (undoable && undoable.undoable_fills.length === 0 && recordPendingVerdict(ledger, row)) {
+      pending_recorded += 1;
+    }
+  }
   let mergeRepaired = false;
   let mergeNote = null;
-  if (retractions.length) {
+  if (retractions.length || pending_recorded) {
     try {
       const res = saveLedgerWithRepair(ledgerPath, ledger);
       mergeRepaired = res.repaired;
@@ -736,7 +848,7 @@ export async function watchRetractions({ db, cursor, bin = 'reeflog', limit = 10
     const parked = parkLines(defects.map((x) => x.line), ledgerPath);
     die(lineRefusal('reorg', defects, parked));
   }
-  return { exit: t.code, stderr: t.err, retractions, mergeRepaired, mergeNote };
+  return { exit: t.code, stderr: t.err, retractions, pending_recorded, mergeRepaired, mergeNote };
 }
 
 // --- webhook mode ----------------------------------------------------------
@@ -829,8 +941,21 @@ export async function runWebhookReceiver({ port, secret, ledgerPath, log = () =>
         const undone = retracted.reduce((n, x) => n + x.undoable_fills.length, 0);
         ledger.meta.retractions_seen = (ledger.meta.retractions_seen || 0) + 1;
         if (undone === 0 && retracted[0] && retracted[0].undoable_fills.length === 0) {
-          // An unknown-signature retraction is health for nobody: keep the
-          // report visible, not only in the log line.
+          // PULS Y — an unknown-signature retraction is a VERDICT about a
+          // delivery that may not have happened yet (the channels cross:
+          // reeflog delivers events by seq and reorgs by reorg_id, two
+          // independent orders). The pre-fix branch kept a COUNTER
+          // (retractions_unknown) — health nobody can act on — while the
+          // 200 receipt made this verdict unrepeatable. Record it as a
+          // DURABLE PENDING VERDICT (same rule retract mode runs): when
+          // the event arrives, absorbRow refuses to open the fill and the
+          // join moves the evidence into `retractions`. A signature whose
+          // fill is ALREADY undone stays a pure report (the verdict is
+          // applied — Q1c's redelivery must not re-pend it).
+          recordPendingVerdict(ledger, payload);
+          // The report stays visible for the run that saw it (an
+          // unknown-signature retraction is health for nobody), but it is
+          // no longer the only copy of the verdict.
           ledger.meta.retractions_unknown = (ledger.meta.retractions_unknown || []);
           ledger.meta.retractions_unknown.push({
             reorg_id: payload.reorg_id ?? null, signature: payload.signature });

@@ -1,0 +1,82 @@
+{
+  "generatedAt": "2026-11-12T08:07:52.847Z",
+  "tool": "tools/measure-retraction-crossing.mjs",
+  "label": "fixed",
+  "verdict": "clean",
+  "defect": "reeflog delivers events by seq and reorgs by reorg_id — two independent cursors. A retraction delivered BEFORE its event was answered \"no such fill\" and the mailbox receipt/cursor moved past the verdict forever; the later event delivery booked the fill OPEN, so the ledger permanently claims a reverted transaction is an open fill. Both transports reproduce it: retract-then-tail on one cursor pair, and a reorg POSTed before the event.",
+  "faces": [
+    {
+      "face": "Y1_cli_retract_cursor_crosses_before_event",
+      "violated": false,
+      "detail": "retract pending_recorded -> tail retraction_first_ignored=1, fill lands in retractions",
+      "retract_report": {
+        "mode": "retract",
+        "retractions": 1,
+        "undoable": 0,
+        "undone_fills": 0,
+        "pending_recorded": 1,
+        "open_fills": 0,
+        "merge_repair": null,
+        "mailbox_exit": 0,
+        "verdict": "COMPLETE"
+      },
+      "tail_report": {
+        "rows": 1,
+        "fills": 1,
+        "retraction_first_ignored": 1,
+        "verdict": "COMPLETE"
+      },
+      "open_fills": 0,
+      "retractions": 1
+    },
+    {
+      "face": "Y2_webhook_reorg_before_event",
+      "violated": false,
+      "detail": "reorg-first stored pending, event delivery ran the join, fill lands in retractions",
+      "statuses": [
+        200,
+        200
+      ],
+      "open_fills": 0,
+      "retractions": 1
+    },
+    {
+      "face": "Y3_verdict_is_durable_not_counter_only",
+      "violated": false,
+      "detail": "one pending verdict for the signature, reorg_ids named",
+      "pending_count": 1,
+      "pending": [
+        {
+          "signature": "65MbpjcSFqAaBzc8v2eKx31ZeKxqVtR7saokLZN6R3KD6SpXP624Xdj6dVsWDYdLiVnPBoqE1bjf5HVXLsw3bA86",
+          "reorg_ids": [
+            1
+          ]
+        }
+      ]
+    }
+  ],
+  "guards": [
+    {
+      "face": "G1_in_order_unchanged",
+      "violated": false,
+      "detail": "open=0 retracted=1"
+    },
+    {
+      "face": "G2_scoped_undo_unchanged",
+      "violated": false,
+      "detail": "fill held, no unfill"
+    },
+    {
+      "face": "G3_dedup_unchanged",
+      "violated": false,
+      "detail": "dupes=1, no refusal count"
+    }
+  ],
+  "summary": {
+    "faces_violated": 0,
+    "faces_total": 3,
+    "violated_faces": [],
+    "guards_violated": 0,
+    "guards_total": 3
+  }
+}

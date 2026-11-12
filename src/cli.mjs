@@ -92,6 +92,11 @@ if (mode === 'tail') {
     fills: r.legs,
     duplicates_ignored: r.dupes,
     invalid_events: r.invalid,
+    // PULS Y: deliveries this consumer refused to open because a
+    // retraction verdict for that signature arrived FIRST (the channels
+    // crossed; the mailbox will never resend the verdict). Named, never
+    // silently swallowed — the same lie class as a skipped line.
+    retraction_first_ignored: r.retractionFirst || 0,
     open_fills: Object.keys(r.ledger.fills).length,
     // PULS O: "applied" means this run hit a freshness clash and performed
     // the repair its own refusal names (reload the durable copy, merge, save)
@@ -135,6 +140,10 @@ if (mode === 'retract') {
     retractions: r.retractions.length,
     undoable: retractions.length,
     undone_fills: retractions.reduce((n, x) => n + x.undoable_fills.length, 0),
+    // PULS Y: retraction verdicts stored as pending because the event had
+    // not been read yet — the cursor moves past them, so the ledger must
+    // not lose them.
+    pending_recorded: r.pending_recorded || 0,
     open_fills: Object.keys(loadLedger(ledgerPath).fills).length,
     merge_repair: r.mergeRepaired ? 'applied' : null,
     mailbox_exit: r.exit,
