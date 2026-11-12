@@ -47,7 +47,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { createHmac } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 
 import {
   loadLedger, absorbRow, applyRetractions, runWebhookReceiver, saveLedger, mergeLedger as importMerge,
@@ -55,9 +54,6 @@ import {
 
 const FIX = JSON.parse(fs.readFileSync(new URL('./fixtures.json', import.meta.url), 'utf8'));
 const CLI = new URL('../src/cli.mjs', import.meta.url).pathname;
-const REEFLOG = process.env.REEFLOG_BIN
-  || path.join(os.homedir(), 'github_repos', 'reeflog', 'target', 'release', 'reeflog');
-
 function tmpdir(t) {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), 'ww-pulsy-'));
   t.after(() => { fs.rmSync(d, { recursive: true, force: true }); });
@@ -113,12 +109,6 @@ async function hook(ledgerPath, payloads) {
   return out;
 }
 
-function sqlite(db, sqlText) {
-  const d = new DatabaseSync(db);
-  d.exec(sqlText);
-  d.close();
-}
-
 // Y1 — the crossing, end to end, through the REAL receiver with the REAL
 // reeflog delivery order (event queue blocked → retractions jump ahead):
 // reorg first (unknown signature at that moment), then the event.
@@ -147,28 +137,41 @@ test('Y1: a retraction delivered before its event undoes the fill when the event
     'the retraction record must carry the pending verdict (the reorg that undid it)');
 });
 
+// A bin that answers each channel exactly once with one row — the shape
+// reeflog's `reorg tail` / `tail` produce on the crossed run (the mailbox
+// cursor semantics themselves are reeflog's own; the REAL-binary face of
+// this crossing is measured by tools/measure-retraction-crossing.mjs
+// against the actual binary, which CI does not have).
+function crossingBin(dir) {
+  const reorgRow = { reorg_id: 1, signature: FIX.traded[0].signature, slot: FIX.traded[0].slot,
+    detected_at: 1, status_source: 'getTransaction', tx_source: 'rpc', detail: 'reverted' };
+  const eventRow = { seq: 1, signature: FIX.traded[0].signature, slot: FIX.traded[0].slot,
+    seal: 'finalized', err: null,
+    logs: [`Program whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc invoke [1]`,
+      `Program data: ${FIX.traded[0].program_data}`,
+      `Program whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc success`] };
+  const file = path.join(dir, 'crossing-bin');
+  fs.writeFileSync(file,
+    '#!/usr/bin/env node\n' +
+    `const reorgRow = ${JSON.stringify(reorgRow)};\n` +
+    `const eventRow = ${JSON.stringify(eventRow)};\n` +
+    `const args = process.argv.slice(2);\n` +
+    `process.stdout.write(JSON.stringify(args[0] === 'reorg' ? reorgRow : eventRow) + '\\n');\n` +
+    'process.exit(0);\n');
+  fs.chmodSync(file, 0o755);
+  return file;
+}
+
 // Y2 — same crossing on the CLI/retract channel: retract drains the reorg
 // channel first (its cursor moves PAST the verdict), then tail delivers.
 test('Y2: retract drains the reorg cursor first, tail delivers after — the fill still cannot open (CLI channel)', async (t) => {
   const d = tmpdir(t);
   const db = path.join(d, 'db');
-  const LOGS = JSON.stringify([
-    `Program whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc invoke [1]`,
-    `Program data: ${FIX.traded[0].program_data}`,
-    `Program whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc success`,
-  ]);
-  const r0 = spawnSync(REEFLOG, ['init', '--db', db, '--program', 'whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc'], { encoding: 'utf8' });
-  assert.equal(r0.status, 0, `reeflog init failed: ${r0.stderr}`);
-  const j = new DatabaseSync(db);
-  j.exec(`INSERT INTO events(seq,signature,slot,err,logs,source,first_seen,payload_state,accounts,account_state)
-    VALUES (1,'${FIX.traded[0].signature}',100,NULL,'${LOGS.replace(/'/g, "''")}','ws',1,'held',NULL,NULL);
-    INSERT INTO reorgs(signature,slot,detected_at,status_source,tx_source,detail)
-    VALUES ('${FIX.traded[0].signature}',100,1,'getTransaction','rpc','reverted');`);
-  j.close();
+  const bin = crossingBin(d);
   // 1. retract first: the reorg channel is drained, its cursor moves past
   //    the verdict. Pre-fix: undoable 0, COMPLETE, nothing remembered.
   const r1 = spawnSync(process.execPath, [CLI, 'retract', '--db', db, '--cursor', path.join(d, 'rc'),
-    '--ledger', path.join(d, 'L.json'), '--bin', REEFLOG], { encoding: 'utf8' });
+    '--ledger', path.join(d, 'L.json'), '--bin', bin], { encoding: 'utf8' });
   assert.equal(r1.status, 0, `retract run failed: ${r1.stderr}`);
   const rep1 = JSON.parse(r1.stdout.slice(r1.stdout.indexOf('{')));
   assert.equal(rep1.undoable, 0, 'setup: nothing to undo yet');
@@ -178,7 +181,7 @@ test('Y2: retract drains the reorg cursor first, tail delivers after — the fil
     'the unknown-signature retraction must become a durable pending verdict, not a counter bump');
   // 2. tail second: the event whose verdict already arrived is delivered.
   const r2 = spawnSync(process.execPath, [CLI, 'tail', '--db', db, '--cursor', path.join(d, 'ec'),
-    '--ledger', path.join(d, 'L.json'), '--bin', REEFLOG], { encoding: 'utf8' });
+    '--ledger', path.join(d, 'L.json'), '--bin', bin], { encoding: 'utf8' });
   assert.equal(r2.status, 0, `tail run failed: ${r2.stderr}`);
   const rep2 = JSON.parse(r2.stdout.slice(r2.stdout.indexOf('{')));
   assert.equal(rep2.retraction_first_ignored, 1,
