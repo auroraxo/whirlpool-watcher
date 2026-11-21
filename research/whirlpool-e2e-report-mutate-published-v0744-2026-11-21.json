@@ -1,0 +1,82 @@
+{
+  "measured_at": "2026-11-21T00:16:53.206Z",
+  "mutate": true,
+  "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "window": {
+    "lo": 471933440,
+    "hi": 471933641,
+    "n": 3936
+  },
+  "naive": {
+    "polls": 29,
+    "signatures_tracked": 4689,
+    "signatures_in_window": 3314,
+    "txs_bought": 120,
+    "txs_with_trades": 22,
+    "skipped_failed": 45,
+    "skipped_zero": 0,
+    "errors": 0,
+    "rpc_calls": 191
+  },
+  "watcher": {
+    "rows": 3936,
+    "fills": 800,
+    "rpc_calls": 0,
+    "decode_ms": 278
+  },
+  "chain_witness": {
+    "witnessed": 39,
+    "transfer_witnessed": 0,
+    "mismatched": 3,
+    "unavailable": 0,
+    "fee_adjusted": 0,
+    "sampled": 42,
+    "fee_fills_sampled": 2,
+    "total_fills": 800,
+    "witness_limit": 40,
+    "fee_witness_limit": 20,
+    "mismatched_detail": [
+      "2KLpPa2nZ4gb in=8185426 out=13010810",
+      "66aPim6RRAnK in=1883491 out=2994452",
+      "4ZzpaVfwCKTM in=1880179 out=2989419"
+    ]
+  },
+  "checks": [
+    {
+      "name": "consumer_makes_no_rpc_calls",
+      "pass": true,
+      "detail": "0 RPC calls made by the watcher itself"
+    },
+    {
+      "name": "window_superset",
+      "pass": true,
+      "detail": "22 in-window naive trades, 684 sigs in the ledger, missing 0"
+    },
+    {
+      "name": "decoded_amounts_match",
+      "pass": false,
+      "detail": "0 overlapping legs decode identically, 29 mismatch(es) first={\"sig\":\"4FXRdYn9vmYRKJPQ\",\"naive\":{\"i\":\"1471902\",\"o\":\"6935\"},\"watcher\":[{\"i\":\"6935\",\"o\":\"1471902\"}]}"
+    },
+    {
+      "name": "chain_witness",
+      "pass": false,
+      "detail": "39/42 sampled ledger fills (seq order, sample of 800) corroborated by the chain (attributed transfers v2 + net-delta fallback v1); transfer_witnessed=0 mismatched=3 unavailable=0 fee_adjusted=0 fee_fills_sampled=2; contradiction: 2KLpPa2nZ4gb in=8185426 out=13010810 | 66aPim6RRAnK in=1883491 out=2994452 | 4ZzpaVfwCKTM in=1880179 out=2989419"
+    },
+    {
+      "name": "no_guessed_fills",
+      "pass": true,
+      "detail": "800 fills, all with a decoded pool; 0 invalid leg(s) reported, none guessed"
+    },
+    {
+      "name": "exactly_once_on_replay",
+      "pass": true,
+      "detail": "ledger 800 fills before replay, 800 after (0 legs seen again, 0 deduped)"
+    },
+    {
+      "name": "retraction_undo_is_scoped",
+      "pass": true,
+      "detail": "known signature undid 1 fill(s), unknown signature 0; ledger 800 -> 799 open, 1 retracted"
+    }
+  ]
+}

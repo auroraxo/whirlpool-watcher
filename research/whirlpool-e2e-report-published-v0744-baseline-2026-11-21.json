@@ -1,0 +1,80 @@
+{
+  "measured_at": "2026-11-20T23:43:23.981Z",
+  "mutate": false,
+  "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "window": {
+    "lo": 471924061,
+    "hi": 471924322,
+    "n": 2155
+  },
+  "naive": {
+    "polls": 29,
+    "signatures_tracked": 2509,
+    "signatures_in_window": 2158,
+    "txs_bought": 120,
+    "txs_with_trades": 27,
+    "skipped_failed": 57,
+    "skipped_zero": 1,
+    "errors": 0,
+    "rpc_calls": 190
+  },
+  "watcher": {
+    "rows": 2155,
+    "fills": 770,
+    "rpc_calls": 0,
+    "decode_ms": 301
+  },
+  "chain_witness": {
+    "witnessed": 39,
+    "mismatched": 2,
+    "unavailable": 0,
+    "fee_adjusted": 1,
+    "sampled": 41,
+    "fee_fills_sampled": 1,
+    "total_fills": 770,
+    "witness_limit": 40,
+    "fee_witness_limit": 20,
+    "mismatched_detail": [
+      "5VrAzXLJL4Np in=60569137 out=286109",
+      "3GevuNkviwL1 in=60515590 out=285851"
+    ]
+  },
+  "checks": [
+    {
+      "name": "consumer_makes_no_rpc_calls",
+      "pass": true,
+      "detail": "0 RPC calls made by the watcher itself"
+    },
+    {
+      "name": "window_superset",
+      "pass": true,
+      "detail": "27 in-window naive trades, 671 sigs in the ledger, missing 0"
+    },
+    {
+      "name": "decoded_amounts_match",
+      "pass": true,
+      "detail": "31 overlapping legs decode identically, 0 mismatch(es)"
+    },
+    {
+      "name": "chain_witness",
+      "pass": false,
+      "detail": "39/41 sampled ledger fills (seq order, sample of 770) corroborated by the chain's token-balance deltas; mismatched=2 unavailable=0 fee_adjusted=1 fee_fills_sampled=1; contradiction: 5VrAzXLJL4Np in=60569137 out=286109 | 3GevuNkviwL1 in=60515590 out=285851"
+    },
+    {
+      "name": "no_guessed_fills",
+      "pass": true,
+      "detail": "770 fills, all with a decoded pool; 0 invalid leg(s) reported, none guessed"
+    },
+    {
+      "name": "exactly_once_on_replay",
+      "pass": true,
+      "detail": "ledger 770 fills before replay, 770 after (0 legs seen again, 0 deduped)"
+    },
+    {
+      "name": "retraction_undo_is_scoped",
+      "pass": true,
+      "detail": "known signature undid 1 fill(s), unknown signature 0; ledger 770 -> 769 open, 1 retracted"
+    }
+  ]
+}

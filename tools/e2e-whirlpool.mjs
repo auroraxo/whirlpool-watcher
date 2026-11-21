@@ -97,7 +97,7 @@ const { decodeProgramData } = await import(path.join(decodeDir, 'decode.mjs'));
 // The witness rule lives in src/witness.mjs and is copied along; it is NOT
 // mutated (the mutation targets the DECODER), so a mutant decode must still
 // be caught by the same oracle.
-const { witnessVerdict } = await import(path.join(decodeDir, 'witness.mjs'));
+const { witnessVerdictTransfers } = await import(path.join(decodeDir, 'witness.mjs'));
 // Import the watcher from the SAME directory, so its './decode.mjs' is the
 // mutated one when --mutate is on and the original otherwise.
 const { watchTail, loadLedger } = await import(
@@ -328,6 +328,7 @@ check('decoded_amounts_match', mismatches.length === 0 && identical > 0,
 // transaction, which is evidence about the endpoint, not about the decoder,
 // and is reported as its own count, never folded into either.
 let witnessed = 0;
+let transferWitnessed = 0;
 const mismatched = [];
 let unavailable = 0;
 let feeAdjusted = 0;
@@ -362,30 +363,65 @@ for (const f of fills) {
 for (const f of witnessSample) {
   let tx;
   try {
+    // jsonParsed: the witness needs the SPL token-transfer instructions
+    // (attribution), not just the net pre/post balances (v1 space). One
+    // request carries both.
     tx = await rpc('getTransaction', [f.signature, {
-      commitment: 'confirmed', maxSupportedTransactionVersion: 1, encoding: 'json',
+      commitment: 'confirmed', maxSupportedTransactionVersion: 1, encoding: 'jsonParsed',
     }], 'tx');
   } catch { unavailable++; continue; }
   if (!tx?.meta) { unavailable++; continue; }
   const pre = tx.meta.preTokenBalances || [];
   const post = tx.meta.postTokenBalances || [];
   const postByIdx = new Map(post.map((p) => [p.accountIndex, p.uiTokenAmount.amount]));
-  // The witness rule is fee-aware (src/witness.mjs): a token-2022 side with a
-  // declared transfer fee moves NET of that fee, so the raw event amount is
-  // not on chain as such. See the measured case in that file.
+  // v1 space: net deltas (kept: a transfer-2022 fee only shows up here).
   const deltas = pre.map((p) => {
     const after = postByIdx.get(p.accountIndex);
     if (after === undefined) return null;
     return BigInt(after) - BigInt(p.uiTokenAmount.amount);
   }).filter((x) => x !== null);
-  const v = witnessVerdict(f, deltas);
+  // v2 space: the transaction's real token transfers, attributed to the
+  // pool's OWN accounts (owner == fill.pool). This is what lets an honest
+  // collect-fees+swap co-instruction stop netting the swap's legs away.
+  const keys = tx.transaction.message.accountKeys.map((k) => k.pubkey);
+  const poolAccounts = new Set();
+  for (const p of [...pre, ...post]) if (p.owner === f.pool) poolAccounts.add(keys[p.accountIndex]);
+  const transfers = [];
+  for (const g of tx.meta.innerInstructions || []) {
+    for (const ix of g.instructions) {
+      const i = ix.parsed && ix.parsed.info;
+      if (!i) continue;
+      // Only the TOKEN programs' transfers move tokens. A system-program
+      // CPI also parses as {type:'transfer'} — with `lamports`, no amount
+      // (measured live 2026-11-21: it crashed the first v2 run with
+      // `Cannot convert undefined to a BigInt`). A token transfer that
+      // carries no amount is a loud defect, not a row to skip.
+      if (ix.program !== 'spl-token' && ix.program !== 'spl-token-2022') continue;
+      if (ix.parsed.type === 'transferChecked' || ix.parsed.type === 'transfer') {
+        const raw = i.amount ?? (i.tokenAmount && i.tokenAmount.amount);
+        if (raw === undefined || raw === null) {
+          throw new Error(`token ${ix.parsed.type} in ${f.signature.slice(0, 12)} carries no amount`);
+        }
+        transfers.push({
+          amount: BigInt(raw),
+          source: i.source,
+          destination: i.destination,
+          intoPool: poolAccounts.has(i.destination),
+          fromPool: poolAccounts.has(i.source),
+        });
+      }
+    }
+  }
+  const v = witnessVerdictTransfers(f, { transfers, deltas });
+  if (v.transferWitnessed) transferWitnessed++;
   if (v.feeAdjusted) feeAdjusted++;
   if (v.witnessed) witnessed++;
   else mismatched.push(`${f.signature.slice(0, 12)} in=${f.input} out=${f.output}`);
 }
 check('chain_witness', mismatched.length === 0 && witnessed > 0,
   `${witnessed}/${witnessSample.length} sampled ledger fills (seq order, sample of ${fills.length}) ` +
-  `corroborated by the chain's token-balance deltas; mismatched=${mismatched.length} ` +
+  `corroborated by the chain (attributed transfers v2 + net-delta fallback v1); ` +
+  `transfer_witnessed=${transferWitnessed} mismatched=${mismatched.length} ` +
   `unavailable=${unavailable} fee_adjusted=${feeAdjusted} fee_fills_sampled=${feeFillsInSample}` +
   (mismatched.length ? `; contradiction: ${mismatched.slice(0, 3).join(' | ')}` : ''));
 
@@ -434,7 +470,7 @@ const report = {
   window: win,
   naive: { polls, signatures_tracked: sigSlot.size, signatures_in_window: naiveInCount, txs_bought: bought, txs_with_trades: naive.size, skipped_failed, skipped_zero, errors, rpc_calls: rpcCalls.sigs + rpcCalls.tx },
   watcher: { rows: w.rows, fills: fills.length, rpc_calls: watcherCalls, decode_ms: watchMs },
-  chain_witness: { witnessed, mismatched: mismatched.length, unavailable, fee_adjusted: feeAdjusted, sampled: witnessSample.length, fee_fills_sampled: feeFillsInSample, total_fills: fills.length, witness_limit: WITNESS_LIMIT, fee_witness_limit: FEE_WITNESS_LIMIT, mismatched_detail: mismatched.slice(0, 10) },
+  chain_witness: { witnessed, transfer_witnessed: transferWitnessed, mismatched: mismatched.length, unavailable, fee_adjusted: feeAdjusted, sampled: witnessSample.length, fee_fills_sampled: feeFillsInSample, total_fills: fills.length, witness_limit: WITNESS_LIMIT, fee_witness_limit: FEE_WITNESS_LIMIT, mismatched_detail: mismatched.slice(0, 10) },
   checks,
 };
 fs.writeFileSync(REPORT, JSON.stringify(report, null, 2));

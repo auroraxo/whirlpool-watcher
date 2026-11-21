@@ -377,13 +377,26 @@ mainnet window and checks:
 3. `decoded_amounts_match` — overlapping fills decode identically, from two
    independently written decoders.
 4. `chain_witness` — every ledger fill's input/output amounts appear as real
-   token-balance moves in a transaction re-fetched from the chain by signature.
-   A side with a declared transfer fee is matched **net of that fee**, because
-   that is what actually moved (`input - input_transfer_fee`); measured on live
-   mainnet 2026-11-09, a 3% transfer-fee mint produced `169628503 - 5088856 =
-   164539647` on chain while the raw amount appeared nowhere — the old
-   raw-only rule called that correct decode a contradiction. The sample always
-   includes fee-bearing fills so the branch is exercised, not just written.
+   token movements in a transaction re-fetched from the chain by signature.
+   The witness (v2, `test/witness-attributed.test.mjs`) uses two spaces,
+   per side:
+   - **Attributed transfers** (primary): the amount appears as a real SPL
+     token transfer INTO a pool-owned account (input) / OUT of one
+     (output), exact, direction checked. This is what keeps an honest
+     co-instruction from hiding a fill: measured live 2026-11-21 on a
+     collect-fees+swap transaction, the pool's NET balance deltas were
+     −3,130,330 and −581,328 while the swap's real legs (60,569,137 in /
+     286,109 out) were visible as transfers — the old netting-only oracle
+     reported the correct decode as a contradiction (2 of 41 sampled
+     fills on the PUBLISHED reeflog v0.7.44 bytes).
+   - **Net balance deltas** (fallback, per side): a token-2022 mint with a
+     declared transfer fee never moves the raw amount as one transfer —
+     measured 2026-11-09, a 3% fee mint produced `169628503 - 5088856 =
+     164539647` on chain while the raw amount appeared nowhere. That side
+     matches net of its declared fee only. The sample always includes
+     fee-bearing fills so the fallback is exercised, not just written.
+   A fill is witnessed only when BOTH sides match; the report names which
+   space carried the run (`transfer_witnessed`).
 5. `no_guessed_fills` — every ledger fill came from a `Traded` event; invalid legs
    are counted, never guessed.
 6. `exactly_once_on_replay` — a second tail run adds no fill.
@@ -391,18 +404,22 @@ mainnet window and checks:
    read, and nothing else (an unknown signature undoes nothing).
 
 `--mutate` corrupts the decoder on purpose and requires check 3 to go red: a green
-harness over a broken decoder is worse than no harness. (Check 4 alone cannot
-catch a pure swap when both amounts are on chain — it proves the amounts are
-real, not their direction; that limit is pinned by the `LIMIT` test in
-`test/witness.test.mjs`.)
+harness over a broken decoder is worse than no harness. Check 4's attribution also
+carries direction (input must come INTO the pool, output must leave it), so a pure
+swap fails there too whenever the reversed amounts do not exist in the reversed
+directions; the residual boundary — both amounts genuinely moving both ways in one
+transaction — is pinned by the `LIMIT` test in `test/witness.test.mjs` (which
+probes the v1 delta space) so nobody later mistakes either witness for a swap
+detector.
 
 ## Limits (honest)
 
 - **No external users yet.** This is the mailbox owner's own consumer, in its own
   second repository; it is user-zero evidence, not adoption.
 - The `Traded` event is the pool's own accounting of the swap; the
-  `chain_witness` check corroborates it against token balance deltas,
-  matching transfer-2022 sides net of the verbatim
+  `chain_witness` check corroborates it against attributed token transfers
+  (primary) and net token-balance deltas (fallback), matching transfer-2022
+  sides net of the verbatim
   `input_transfer_fee`/`output_transfer_fee`. The watcher still carries the raw
   amounts and the fees separately and does not net them into the fill — the
   fee-adjusted value exists only inside the witness rule, so no consumer gets a

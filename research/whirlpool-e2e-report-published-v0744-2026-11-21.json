@@ -1,0 +1,78 @@
+{
+  "measured_at": "2026-11-21T00:11:16.927Z",
+  "mutate": false,
+  "program": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+  "rpc": "https://api.mainnet-beta.solana.com",
+  "window": {
+    "lo": 471931865,
+    "hi": 471932138,
+    "n": 1962
+  },
+  "naive": {
+    "polls": 29,
+    "signatures_tracked": 1819,
+    "signatures_in_window": 1603,
+    "txs_bought": 120,
+    "txs_with_trades": 38,
+    "skipped_failed": 15,
+    "skipped_zero": 0,
+    "errors": 0,
+    "rpc_calls": 189
+  },
+  "watcher": {
+    "rows": 1962,
+    "fills": 653,
+    "rpc_calls": 0,
+    "decode_ms": 266
+  },
+  "chain_witness": {
+    "witnessed": 39,
+    "transfer_witnessed": 39,
+    "mismatched": 0,
+    "unavailable": 1,
+    "fee_adjusted": 0,
+    "sampled": 40,
+    "fee_fills_sampled": 0,
+    "total_fills": 653,
+    "witness_limit": 40,
+    "fee_witness_limit": 20,
+    "mismatched_detail": []
+  },
+  "checks": [
+    {
+      "name": "consumer_makes_no_rpc_calls",
+      "pass": true,
+      "detail": "0 RPC calls made by the watcher itself"
+    },
+    {
+      "name": "window_superset",
+      "pass": true,
+      "detail": "38 in-window naive trades, 601 sigs in the ledger, missing 0"
+    },
+    {
+      "name": "decoded_amounts_match",
+      "pass": true,
+      "detail": "42 overlapping legs decode identically, 0 mismatch(es)"
+    },
+    {
+      "name": "chain_witness",
+      "pass": true,
+      "detail": "39/40 sampled ledger fills (seq order, sample of 653) corroborated by the chain (attributed transfers v2 + net-delta fallback v1); transfer_witnessed=39 mismatched=0 unavailable=1 fee_adjusted=0 fee_fills_sampled=0"
+    },
+    {
+      "name": "no_guessed_fills",
+      "pass": true,
+      "detail": "653 fills, all with a decoded pool; 0 invalid leg(s) reported, none guessed"
+    },
+    {
+      "name": "exactly_once_on_replay",
+      "pass": true,
+      "detail": "ledger 653 fills before replay, 653 after (0 legs seen again, 0 deduped)"
+    },
+    {
+      "name": "retraction_undo_is_scoped",
+      "pass": true,
+      "detail": "known signature undid 1 fill(s), unknown signature 0; ledger 653 -> 652 open, 1 retracted"
+    }
+  ]
+}
